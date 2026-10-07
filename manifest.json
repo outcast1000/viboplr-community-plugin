@@ -1,0 +1,31 @@
+{
+  "id": "community",
+  "name": "Viboplr Community",
+  "version": "0.1.0",
+  "author": "Viboplr",
+  "description": "Share your Now Playing cue sheets on Viboplr Community and import ones other people made. Sign in with GitHub to publish; browsing and importing need no account.",
+  "minAppVersion": "1.0.93",
+  "stability": "experimental",
+  "homepage": "https://github.com/outcast1000/viboplr-community-plugin",
+  "updateUrl": "https://github.com/outcast1000/viboplr-community-plugin/releases/latest/download/update.json",
+  "icon": "M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7M16 6l-4-4-4 4M12 2v13",
+  "runtime": "worker",
+  "permissions": ["network:community.viboplr.com", "system:open", "cues:read", "cues:write", "playback:read"],
+  "apiUsage": [
+    { "api": "network.fetch", "reason": "Browse, import and publish cue sheets on community.viboplr.com" },
+    { "api": "network.openUrl", "reason": "Sign in with GitHub in your browser, and open a sheet's page on the server" },
+    { "api": "cues.set", "reason": "Install a cue sheet you chose to import" },
+    { "api": "cues.list", "reason": "List your own sheets so you can publish them" },
+    { "api": "playback.getCurrentTrack", "reason": "Find shared sheets for the song that's playing" }
+  ],
+  "viewHeader": { "subtitle": "Cue sheets shared by Viboplr users" },
+  "contributes": {
+    "sidebarItems": [
+      { "id": "community", "label": "Community", "icon": "M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7M16 6l-4-4-4 4M12 2v13" }
+    ],
+    "contextMenuItems": [
+      { "id": "find-cues", "label": "Find shared cue sheets", "targets": ["track"] },
+      { "id": "publish-cues", "label": "Publish cue sheet…", "targets": ["track"] }
+    ]
+  }
+}
