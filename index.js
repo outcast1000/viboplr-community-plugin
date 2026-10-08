@@ -26,6 +26,7 @@ var VIEW = "community";
 var TIMEOUT_MS = 15000;
 var AUTH_TTL_MS = 10 * 60 * 1000;
 var LINK_PREFIX = "viboplr://plugin/community/";
+var USER_AGENT = "Viboplr-Community-Plugin/0.1 (+https://github.com/outcast1000/viboplr-community-plugin)";
 var MAX_AUTHOR_CHARS = 64;
 var FIRST_LOAD_DELAY_MS = 3000;
 
@@ -219,7 +220,7 @@ function requestError(message, status) {
 // One request to the server. `auth` adds the bearer token and turns a 401 into
 // a signed-out state (the token was revoked or the account suspended).
 function request(method, path, body, auth) {
-  var headers = { Accept: "application/json" };
+  var headers = { Accept: "application/json", "User-Agent": USER_AGENT };
   if (auth) {
     if (!state.token) return Promise.reject(requestError("Sign in with GitHub first.", 401));
     headers.Authorization = "Bearer " + state.token;
@@ -243,6 +244,21 @@ function request(method, path, body, auth) {
         throw requestError("Your Viboplr Community sign-in has ended. Sign in again.", 401);
       }
       if (resp.status >= 400) throw requestError((data && data.error) || "Viboplr Community answered HTTP " + resp.status, resp.status);
+      // A 3xx here is a redirect the host refused to follow (it leads off
+      // community.viboplr.com — a captive portal or a filtering proxy), and a
+      // 2xx without JSON is nobody we know. Either way, say what came back.
+      if (resp.status >= 300 || data === null) {
+        api.log("warn", "Unexpected answer to " + method + " " + path + " (HTTP " + resp.status + "): " + String(text || "").slice(0, 200));
+        var where = resp.headers && resp.headers.location ? " to " + resp.headers.location : "";
+        throw requestError(
+          resp.status >= 300
+            ? "the request was redirected" + where + " (HTTP " + resp.status + ") — something on your network may be blocking community.viboplr.com"
+            : /^\s*</.test(text || "")
+              ? "a web page came back instead of Viboplr Community — a company proxy or filter on your network is intercepting community.viboplr.com"
+              : "the server's answer wasn't readable (HTTP " + resp.status + ")",
+          resp.status
+        );
+      }
       return data;
     });
   });

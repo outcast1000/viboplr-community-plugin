@@ -207,6 +207,20 @@ test("an unreachable server is a banner in the view, not a toast", async () => {
   assert.equal(host.notices.length, 0);
 });
 
+test("a proxy's web page instead of JSON is named as such, and requests identify themselves", async () => {
+  // Seen live behind Zscaler: HTTP 200 carrying its "Browser Isolation" page.
+  const { host } = await setup(() => ({ status: 200, body: undefined }));
+  host.api.network.fetch = async (url, init = {}) => {
+    host.requests.push({ url, init });
+    return { status: 200, headers: {}, text: async () => "<!doctype html><title>Browser Isolation</title>" };
+  };
+  await host.actions.search({ query: "x" });
+  const banners = nodes(host.lastView(), "layout").filter((n) => /ds-banner/.test(n.className || ""));
+  assert.match(banners[0].children[0].content, /proxy or filter on your network/);
+  assert.match(host.requests[0].init.headers["User-Agent"], /^Viboplr-Community-Plugin\//);
+  assert.ok(host.logs.some((l) => l.level === "warn" && /Browser Isolation/.test(l.message)));
+});
+
 test("My sheets marks published, imported and own sheets differently", async () => {
   const p = loadPlugin();
   const sheet = { title: "Song", artistName: "Band", sheet: SHEET, updatedAt: 5, author: "Claude" };
