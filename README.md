@@ -9,6 +9,7 @@ This plugin is the Viboplr client for [Viboplr Community](https://community.vibo
   - A **Mine** section listing what you shared, with Open page and Edit.
 - **Integrations** (`INTEGRATIONS` in `index.js`, keyed by `kind`) add what only app code can do:
   - **Cue sheets:** **Import**/**Update** through the host's `api.cues`, the "for one song" scope (the playing track, or the one you right-clicked), and a Mine section for the sheets on this computer, with publish, update and unpublish. A sheet imported from the community that you haven't changed isn't offered for publishing.
+  - **Mixtapes:** **Play** (through `api.playback.playTracks`, with a playlist banner) and **Save to Playlists** (through `api.playlists.save`). Every entry is metadata-only, so the app's resolvers find each song in the library, on a server or through a plugin. A saved mixtape records `{ communityId, communityVersion }` in its playlist `metadata`, so the tab badges it Saved or Update, and Mine marks it "From the community" and won't publish it. Publish a saved playlist (right-click it in Playlists → **Publish as a mixtape…**, or from Mine) or the queue (Mine → name it → **Publish the queue**). Only title, artist, album and length are sent, never a file path or plugin URI.
   - **Servers:** **Add** passes the listing, public login included, to `api.collections.requestAdd`, which opens the app's own Add Server dialog already filled in. The user confirms there.
 
 **Adding a module:** declare it on the server (`src/modules.rs` in `viboplr-community`). It then appears here, and on viboplr.com's Community page, without a release. Add an `INTEGRATIONS` entry only when the module should do something in the app beyond opening its page.
@@ -17,13 +18,14 @@ Sign-in and links:
 - **Sign in with GitHub** opens your browser. The server hands a one-time code back through `viboplr://plugin/community/auth`, and the plugin trades it for a revocable token using PKCE.
   - The verifier never leaves the plugin.
   - The GitHub token never reaches the app.
-- **Share links** of the form `viboplr://plugin/community/open?id=…` (a cue sheet's *Open in Viboplr* button) open the sheet, ready to import.
+- **Share links** of the form `viboplr://plugin/community/open?id=…` (the *Open in Viboplr* button on a cue sheet or mixtape page) open the item: a cue sheet ready to import, a mixtape ready to save.
 
 It needs Viboplr **1.0.93+**, the first release with the `api.cues` plugin API. It runs on the worker runtime with these permissions:
 - `network:community.viboplr.com`
 - `system:open`
 - `cues:read` / `cues:write`
-- `playback:read`
+- `playback:read` / `playback:control` (find sheets for the playing song, publish the queue, play a mixtape)
+- `library:read` / `library:write` (list and read your playlists to publish them; save a mixtape)
 
 The server lives in [`outcast1000/viboplr-community`](https://github.com/outcast1000/viboplr-community).
 

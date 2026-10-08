@@ -315,13 +315,13 @@ test("tabs are one per module plus Mine, which has a section per module", async 
     { session: { token: "vcom_tok", user: { login: "alice" } } }
   );
   await host.addSheet("Jóga", "Björk", SHEET);
-  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["cue_sheet", "subsonic_server", "mine"]);
+  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["cue_sheet", "mixtape", "subsonic_server", "mine"]);
 
   await host.actions.tab({ tabId: "mine" });
   const sections = nodes(host.lastView(), "section");
-  // Cue sheets bring their own section (the sheets on this computer); servers use the generic one.
-  assert.deepEqual(sections.map((n) => n.title), ["Cue sheets on this computer", "Your servers"]);
-  const [sheets, servers] = sections.map((n) => nodes({ children: n.children }, "track-row-list")[0]);
+  // Cue sheets and mixtapes bring their own sections (what's on this computer); servers use the generic one.
+  assert.deepEqual(sections.map((n) => n.title), ["Cue sheets on this computer", "Your playlists", "Your servers"]);
+  const [sheets, , servers] = sections.map((n) => nodes({ children: n.children }, "track-row-list")[0]);
   assert.equal(sheets.items[0].badge.label, "Published", "matched against your cue sheets online");
   assert.equal(servers.items[0].title, "Jazz box");
   assert.deepEqual(servers.items[0].actions, ["page", "edit"]);
@@ -333,14 +333,14 @@ test("tabs are one per module plus Mine, which has a section per module", async 
 });
 
 test("a module the plugin has never heard of still gets a working tab and Mine section", async () => {
-  const PLAYLIST = {
-    id: "pl1",
-    kind: "playlist",
-    title: "Late night",
+  const PRESET = {
+    id: "eq1",
+    kind: "eq_preset",
+    title: "HD 600",
     importCount: 1,
     publisher: { login: "bob" },
-    url: "https://community.viboplr.com/playlists/pl1",
-    card: { title: "Late night", facts: ["12 tracks"], action: { label: "Play in Viboplr", link: "viboplr://x" } },
+    url: "https://community.viboplr.com/eq-presets/eq1",
+    card: { title: "HD 600", facts: ["10 bands"], action: { label: "Use in Viboplr", link: "viboplr://x" } },
   };
   const { plugin, host } = await setup(
     (u) => {
@@ -350,36 +350,36 @@ test("a module the plugin has never heard of still gets a working tab and Mine s
             modules: [
               ...plugin_modules(),
               {
-                kind: "playlist", slug: "playlists", name: "Playlists", singular: "playlist", intro: "",
-                notice: "Shared playlists.", popularLabel: "Most played", useNoun: ["play", "plays"],
-                url: "https://community.viboplr.com/playlists", shareUrl: null,
+                kind: "eq_preset", slug: "eq-presets", name: "EQ presets", singular: "EQ preset", intro: "",
+                notice: "Shared EQ presets.", popularLabel: "Most used", useNoun: ["use", "uses"],
+                url: "https://community.viboplr.com/eq-presets", shareUrl: null,
               },
             ],
           },
         };
       }
-      if (u.pathname === "/v1/items/search" && u.searchParams.get("kind") === "playlist") return { body: { items: [PLAYLIST], hasMore: false } };
-      if (u.pathname === "/v1/me/items") return { body: { items: [PLAYLIST] } };
+      if (u.pathname === "/v1/items/search" && u.searchParams.get("kind") === "eq_preset") return { body: { items: [PRESET], hasMore: false } };
+      if (u.pathname === "/v1/me/items") return { body: { items: [PRESET] } };
       if (u.pathname === "/v1/items/search") return { body: { items: [], hasMore: false } };
     },
     { session: { token: "vcom_tok", user: { login: "bob" } } }
   );
   await plugin._loadModules();
-  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.label), ["Cue sheets", "Servers", "Playlists", "Mine"]);
-  assert.ok(host.storage.get("modules").some((m) => m.kind === "playlist"), "remembered for the next start");
+  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.label), ["Cue sheets", "Mixtapes", "Servers", "EQ presets", "Mine"]);
+  assert.ok(host.storage.get("modules").some((m) => m.kind === "eq_preset"), "remembered for the next start");
 
-  await host.actions.tab({ tabId: "playlist" });
+  await host.actions.tab({ tabId: "eq_preset" });
   const view = host.lastView();
-  assert.ok(nodes(view, "text").some((n) => n.content === "Shared playlists."), "the module's notice");
+  assert.ok(nodes(view, "text").some((n) => n.content === "Shared EQ presets."), "the module's notice");
   const row = nodes(view, "track-row-list")[0];
-  assert.deepEqual(row.actions, [{ id: "page", label: "Open page" }]);
-  assert.deepEqual(row.items[0], { id: "pl1", title: "Late night", subtitle: "12 tracks · @bob · 1 play", actions: ["page"] });
-  await host.actions.page({ itemId: "pl1" });
-  assert.equal(host.opened.at(-1), "https://community.viboplr.com/playlists/pl1");
+  assert.deepEqual(row.actions, [{ id: "page", label: "Open page", icon: "↗" }]);
+  assert.deepEqual(row.items[0], { id: "eq1", title: "HD 600", subtitle: "10 bands · @bob · 1 use", actions: ["page"] });
+  await host.actions.page({ itemId: "eq1" });
+  assert.equal(host.opened.at(-1), "https://community.viboplr.com/eq-presets/eq1");
 
   await host.actions.tab({ tabId: "mine" });
   const titles = nodes(host.lastView(), "section").map((n) => n.title);
-  assert.deepEqual(titles, ["Cue sheets on this computer", "Your servers", "Your playlists"]);
+  assert.deepEqual(titles, ["Cue sheets on this computer", "Your playlists", "Your servers", "Your eq presets"]);
 });
 
 // The built-in module descriptions as the server would send them.
@@ -392,5 +392,189 @@ test("a bad module list from the server is ignored, not fatal", async () => {
     if (u.pathname === "/v1/modules") return { body: { modules: [{ kind: 3 }, null, { name: "no kind" }] } };
   });
   await plugin._loadModules();
-  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["cue_sheet", "subsonic_server", "mine"]);
+  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["cue_sheet", "mixtape", "subsonic_server", "mine"]);
+});
+
+// ---- mixtapes ---------------------------------------------------------------
+
+const MIX = {
+  id: "mx1",
+  kind: "mixtape",
+  title: "Late night",
+  trackCount: 2,
+  artists: ["Miles Davis"],
+  version: 1,
+  importCount: 0,
+  publisher: { login: "bob" },
+  url: "https://community.viboplr.com/mixtapes/mx1",
+  card: { title: "Late night", facts: ["2 tracks", "15 min", "Miles Davis"], action: { label: "Open in Viboplr", link: "viboplr://x" } },
+};
+const MIX_TRACKS = [
+  { title: "So What", artistName: "Miles Davis", albumName: "Kind of Blue", durationSecs: 562 },
+  { title: "Blue in Green", artistName: "Miles Davis", albumName: null, durationSecs: 337 },
+];
+
+// A community holding MIX at `at.version`, recording what's published to it.
+function mixRoute(posted, at = { version: 1 }) {
+  return (u, init) => {
+    const mix = { ...MIX, version: at.version };
+    if (u.pathname === "/v1/items/mx1") return { body: { item: { ...mix, payload: { description: "Slow ones.", tracks: MIX_TRACKS } } } };
+    if (u.pathname === "/v1/items/search") return { body: { items: u.searchParams.get("kind") === "mixtape" ? [mix] : [], hasMore: false } };
+    const published = (body, i) => ({ ...MIX, id: "mine" + i, title: body.title, publisher: { login: "alice" }, url: "https://community.viboplr.com/mixtapes/mine" + i });
+    if (u.pathname === "/v1/me/items") return { body: { items: posted.map(published) } };
+    if (u.pathname === "/v1/items" && init.method === "POST") {
+      const body = JSON.parse(init.body);
+      posted.push(body);
+      return { status: 201, body: { created: true, item: published(body, posted.length - 1) } };
+    }
+    if (u.pathname.endsWith("/imported")) return { status: 204 };
+  };
+}
+
+test("a mixtape's tracks are metadata only, whatever shape they come in", () => {
+  const p = loadPlugin();
+  assert.deepEqual(
+    p._mixtapeTracks([
+      { title: " So What ", artistName: "Miles Davis", albumName: "Kind of Blue", durationSecs: 562, source: "file:///Users/me/Music/a.flac", imagePath: "/x" },
+      { title: "Naima", artist_name: "John Coltrane", album_title: "Giant Steps", duration_secs: 261, path: "spotify:track:1", key: "q:3" },
+      { title: "", artistName: "nobody" },
+      null,
+    ]),
+    [
+      { title: "So What", artistName: "Miles Davis", albumName: "Kind of Blue", durationSecs: 562 },
+      { title: "Naima", artistName: "John Coltrane", albumName: "Giant Steps", durationSecs: 261 },
+    ]
+  );
+});
+
+test("publishing a playlist sends its track list and never a file path", async () => {
+  const posted = [];
+  const { host } = await setup(mixRoute(posted), { session: { token: "vcom_tok", user: { login: "alice" } } });
+  const id = await host.addPlaylist(
+    "Sunday",
+    [{ title: "So What", artistName: "Miles Davis", durationSecs: 562, source: "file:///Users/alice/Music/so-what.flac" }],
+    { description: "Coffee." }
+  );
+  await host.menu["publish-mixtape"]({ kind: "playlist", playlistId: id, playlistName: "Sunday" });
+  assert.equal(posted.length, 1);
+  assert.deepEqual(posted[0], {
+    kind: "mixtape",
+    title: "Sunday",
+    description: "Coffee.",
+    tracks: [{ title: "So What", artistName: "Miles Davis", albumName: null, durationSecs: 562 }],
+  });
+  assert.ok(!JSON.stringify(posted).includes("file://"));
+  assert.match(host.lastNotice().message, /Published “Sunday”/);
+
+  // Mine now shows it as published, with the online actions.
+  await host.actions.tab({ tabId: "mine" });
+  const section = nodes(host.lastView(), "section").find((s) => s.title === "Your playlists");
+  const row = nodes({ children: section.children }, "track-row-list")[0].items[0];
+  assert.equal(row.badge.label, "Published");
+  assert.deepEqual(row.actions, ["republish-playlist", "unpublish-mixtape", "mixtape-page"]);
+});
+
+test("publishing needs a sign-in, and the queue publishes under the name you give it", async () => {
+  const posted = [];
+  const queue = [{ key: "q:1", path: "file:///Users/me/a.mp3", title: "Naima", artist_name: "John Coltrane", album_title: null, duration_secs: 261 }];
+  const signedOut = await setup(mixRoute(posted), { queue });
+  await signedOut.host.actions["publish-queue"]({ query: "Tonight" });
+  assert.equal(posted.length, 0);
+  assert.match(signedOut.host.lastNotice().message, /Sign in/);
+
+  const { host } = await setup(mixRoute(posted), { queue, session: { token: "vcom_tok", user: { login: "alice" } } });
+  await host.actions["publish-queue"]({ query: "  " });
+  assert.equal(posted.length, 0, "a name is required");
+  await host.actions["publish-queue"]({ query: "Tonight" });
+  assert.equal(posted[0].title, "Tonight");
+  assert.deepEqual(posted[0].tracks, [{ title: "Naima", artistName: "John Coltrane", albumName: null, durationSecs: 261 }]);
+});
+
+test("Play plays the mixtape as metadata-only entries with a playlist banner", async () => {
+  const { host } = await setup(mixRoute([]));
+  await host.actions["play-mixtape"]({ itemId: "mx1" });
+  assert.equal(host.plays.length, 1);
+  const play = host.plays[0];
+  assert.equal(play.startIndex, 0);
+  assert.deepEqual(play.context, { name: "Late night", source: "playlist", description: "Slow ones." });
+  assert.deepEqual(play.tracks[0], { title: "So What", artist_name: "Miles Davis", album_title: "Kind of Blue", duration_secs: 562 });
+  await flush();
+  assert.ok(host.requests.some((r) => r.url.endsWith("/v1/items/mx1/imported")), "a play counts");
+});
+
+test("Save remembers where the mixtape came from, and a newer version replaces the saved copy", async () => {
+  const at = { version: 1 };
+  const { host } = await setup(mixRoute([], at));
+  await host.actions.tab({ tabId: "mixtape" });
+  let row = nodes(host.lastView(), "track-row-list")[0].items[0];
+  assert.deepEqual(row.actions, ["play-mixtape", "save-mixtape", "page"]);
+  assert.equal(row.artistName, "Miles Davis", "art from the main artist");
+
+  await host.actions["save-mixtape"]({ itemId: "mx1" });
+  const [saved] = host.playlists.values();
+  assert.equal(saved.name, "Late night");
+  assert.equal(saved.description, "Slow ones.");
+  assert.deepEqual(saved.metadata, { communityId: "mx1", communityVersion: 1, communityBy: "bob" });
+  assert.equal(saved.tracks.length, 2);
+  assert.equal(saved.source, undefined, "plays as an ordinary playlist");
+  row = nodes(host.lastView(), "track-row-list")[0].items[0];
+  assert.equal(row.badge.label, "Saved");
+
+  await host.actions["save-mixtape"]({ itemId: "mx1" });
+  assert.equal(host.playlists.size, 1);
+  assert.match(host.lastNotice().message, /already in your Playlists/);
+
+  // bob republishes: coming back to the tab refetches, the row offers an
+  // update, and the update swaps the saved copy.
+  at.version = 2;
+  await host.actions.tab({ tabId: "mine" });
+  await host.actions.tab({ tabId: "mixtape" });
+  row = nodes(host.lastView(), "track-row-list")[0].items[0];
+  assert.equal(row.badge.label, "Update");
+  await host.actions["update-mixtape"]({ itemId: "mx1" });
+  const copies = [...host.playlists.values()];
+  assert.equal(copies.length, 1);
+  assert.equal(copies[0].metadata.communityVersion, 2);
+  assert.match(host.lastNotice().message, /Updated “Late night”/);
+});
+
+test("Mine offers your own playlists, not Liked/Disliked, the app's mixes or empty ones", async () => {
+  const { host } = await setup(mixRoute([]), { session: { token: "vcom_tok", user: { login: "alice" } } });
+  await host.addPlaylist("Sunday", MIX_TRACKS);
+  await host.addPlaylist("Disliked Tracks", MIX_TRACKS, { systemKind: "disliked" });
+  await host.addPlaylist("Kyuss Mix", MIX_TRACKS, { systemKind: "auto:daily-mix:kyuss" });
+  await host.addPlaylist("Nothing yet", []);
+  await host.actions.tab({ tabId: "mine" });
+  const section = nodes(host.lastView(), "section").find((s) => s.title === "Your playlists");
+  const rows = nodes({ children: section.children }, "track-row-list")[0].items;
+  assert.deepEqual(rows.map((r) => r.title), ["Sunday"]);
+});
+
+test("a saved community mixtape isn't yours to publish", async () => {
+  const posted = [];
+  const { host } = await setup(mixRoute(posted), { session: { token: "vcom_tok", user: { login: "alice" } } });
+  const id = await host.addPlaylist("Late night", MIX_TRACKS, { metadata: { communityId: "mx1", communityVersion: 1, communityBy: "bob" } });
+  await host.actions.tab({ tabId: "mine" });
+  const section = nodes(host.lastView(), "section").find((s) => s.title === "Your playlists");
+  const row = nodes({ children: section.children }, "track-row-list")[0].items[0];
+  assert.equal(row.badge.label, "From the community");
+  assert.deepEqual(row.actions, []);
+  assert.equal(row.subtitle, "2 tracks · by @bob");
+  await host.menu["publish-mixtape"]({ kind: "playlist", playlistId: id, playlistName: "Late night" });
+  assert.equal(posted.length, 0);
+  assert.match(host.lastNotice().message, /isn't yours to publish/);
+});
+
+test("a mixtape share link opens the Mixtapes tab and asks to save", async () => {
+  const { host } = await setup(mixRoute([]));
+  await host.deepLink("viboplr://plugin/community/open?id=mx1");
+  for (let i = 0; i < 10; i++) await flush();
+  assert.deepEqual(host.navigated, ["community"]);
+  const view = host.lastView();
+  assert.equal(nodes(view, "tabs")[0].activeTab, "mixtape");
+  const confirm = nodes(view, "confirm")[0];
+  assert.equal(confirm.confirmAction, "confirm-save-mixtape");
+  assert.match(confirm.message, /@bob's mixtape “Late night” \(2 tracks\)/);
+  await host.actions["confirm-save-mixtape"](confirm.data);
+  assert.equal(host.playlists.size, 1);
 });

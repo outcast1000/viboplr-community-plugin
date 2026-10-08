@@ -3,7 +3,7 @@
 // network.fetch with `{ status, body }` (body is JSON-encoded) or undefined
 // for a 404.
 
-function makeHost({ route, current = null } = {}) {
+function makeHost({ route, current = null, queue = [] } = {}) {
   const host = {
     requests: [],
     opened: [],
@@ -18,7 +18,12 @@ function makeHost({ route, current = null } = {}) {
     cues: new Map(),
     navigated: [],
     addRequests: [],
+    // id → { id, name, description, metadata, tracks }
+    playlists: new Map(),
+    plays: [],
+    queue,
   };
+  let nextPlaylistId = 1;
   const key = (title, artist) =>
     `track:${String(artist || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")}:${String(title).toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")}`;
   let clock = 1000;
@@ -72,7 +77,42 @@ function makeHost({ route, current = null } = {}) {
       },
       delete: async (title, artist) => host.cues.delete(key(title, artist)),
     },
-    playback: { getCurrentTrack: () => current },
+    playback: {
+      getCurrentTrack: () => current,
+      getQueue: () => ({ tracks: host.queue, index: 0 }),
+      playTracks: (tracks, startIndex, context) => host.plays.push({ tracks, startIndex, context }),
+    },
+    playlists: {
+      list: async () =>
+        [...host.playlists.values()].map((p) => ({
+          id: p.id,
+          name: p.name,
+          source: null,
+          savedAt: p.id,
+          imagePath: null,
+          trackCount: p.tracks.length,
+          description: p.description ?? null,
+          metadata: p.metadata ? structuredClone(p.metadata) : null,
+          systemKind: p.systemKind ?? null,
+        })),
+      save: async (data) => {
+        const id = nextPlaylistId++;
+        host.playlists.set(id, { id, ...structuredClone(data) });
+        return id;
+      },
+      delete: async (id) => {
+        host.playlists.delete(id);
+      },
+      getTracks: async (id) =>
+        (host.playlists.get(id)?.tracks || []).map((t) => ({
+          title: t.title,
+          artistName: t.artistName ?? null,
+          albumName: t.albumName ?? null,
+          durationSecs: t.durationSecs ?? null,
+          source: t.source ?? null,
+          imagePath: null,
+        })),
+    },
     collections: {
       requestAdd: async (source) => {
         host.addRequests.push(source);
@@ -100,6 +140,7 @@ function makeHost({ route, current = null } = {}) {
   host.lastHeader = () => host.headers[host.headers.length - 1].header;
   host.lastNotice = () => host.notices[host.notices.length - 1];
   host.addSheet = (title, artist, sheet, extra = {}) => host.api.cues.set(title, artist, sheet, extra);
+  host.addPlaylist = (name, tracks, extra = {}) => host.api.playlists.save({ name, tracks, ...extra });
   return host;
 }
 

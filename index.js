@@ -20,6 +20,13 @@
 //    field, so the mapping song → community item (+ the local updatedAt at
 //    import) is kept in this plugin's storage. That is what lets Mine tell an
 //    untouched import (not ours to republish) from one the user has changed.
+//  - A MIXTAPE IS A TRACK LIST. Publishing sends title/artist/album/length
+//    only — never a track's source (a file path names the publisher's home
+//    folder; a plugin URI plays only where that plugin is installed). Played
+//    or saved here, every entry is metadata-only and the host's resolvers find
+//    a copy. A saved mixtape remembers where it came from in its playlist
+//    `metadata` ({ communityId, communityVersion }), so Mine can tell it apart
+//    from the user's own and the tab can offer an update.
 //  - NOT READY IS A BANNER. A server that can't be reached is shown inside the
 //    view with a Retry, never as a toast (plugin view design guidelines).
 
@@ -31,7 +38,7 @@ var VIEW = "community";
 var TIMEOUT_MS = 15000;
 var AUTH_TTL_MS = 10 * 60 * 1000;
 var LINK_PREFIX = "viboplr://plugin/community/";
-var USER_AGENT = "Viboplr-Community-Plugin/0.1 (+https://github.com/outcast1000/viboplr-community-plugin)";
+var USER_AGENT = "Viboplr-Community-Plugin/0.2(+https://github.com/outcast1000/viboplr-community-plugin)";
 var MAX_AUTHOR_CHARS = 64;
 var FIRST_LOAD_DELAY_MS = 3000;
 var MINE = "mine";
@@ -69,6 +76,9 @@ function freshState() {
     // A pending in-view question: { kind: "import" | "replace", id, title, artist, by }.
     confirm: null,
     lastPublishedUrl: null,
+    // --- mixtapes ---
+    // api.playlists.list() rows; null until read.
+    playlists: null,
   };
 }
 
@@ -163,6 +173,17 @@ var BUILTIN_MODULES = [
     shareUrl: null,
   },
   {
+    kind: "mixtape",
+    slug: "mixtapes",
+    name: "Mixtapes",
+    singular: "mixtape",
+    notice: "A mixtape is a track list, not music: songs you can't get anywhere are skipped.",
+    popularLabel: "Most played",
+    useNoun: ["play", "plays"],
+    url: SERVER + "/mixtapes",
+    shareUrl: null,
+  },
+  {
     kind: "subsonic_server",
     slug: "servers",
     name: "Servers",
@@ -189,6 +210,14 @@ function moduleFor(kind) {
   return null;
 }
 
+// The module as the server describes it, else as this build knows it.
+function knownModule(kind) {
+  var m = moduleFor(kind);
+  if (m) return m;
+  for (var i = 0; i < BUILTIN_MODULES.length; i++) if (BUILTIN_MODULES[i].kind === kind) return BUILTIN_MODULES[i];
+  return null;
+}
+
 function currentModule() {
   return moduleFor(state.tab);
 }
@@ -196,6 +225,33 @@ function currentModule() {
 function uses(m, n) {
   var noun = m && Array.isArray(m.useNoun) ? m.useNoun[n === 1 ? 0 : 1] : n === 1 ? "use" : "uses";
   return n + " " + noun;
+}
+
+// Row actions render as small round buttons, which only fit a glyph; the
+// label becomes the button's tooltip. An action without one keeps its label.
+var ACTION_ICONS = {
+  page: "↗",
+  edit: "✎",
+  import: "⬇",
+  update: "↻",
+  publish: "⇪",
+  republish: "↻",
+  unpublish: "✕",
+  "sheet-page": "↗",
+  "play-mixtape": "▶",
+  "save-mixtape": "＋",
+  "update-mixtape": "↻",
+  "publish-playlist": "⇪",
+  "republish-playlist": "↻",
+  "unpublish-mixtape": "✕",
+  "mixtape-page": "↗",
+  "add-server": "＋",
+};
+
+function withIcons(actions) {
+  return actions.map(function (a) {
+    return ACTION_ICONS[a.id] && !a.icon ? Object.assign({}, a, { icon: ACTION_ICONS[a.id] }) : a;
+  });
 }
 
 // Any item → a row, from its card alone. An integration may then adjust it.
@@ -278,6 +334,43 @@ var INTEGRATIONS = {
       },
       nodes: function () {
         return mySheetNodes();
+      },
+    },
+  },
+  mixtape: {
+    actions: [
+      { id: "play-mixtape", label: "Play" },
+      { id: "save-mixtape", label: "Save to Playlists" },
+      { id: "update-mixtape", label: "Update" },
+    ],
+    row: function (item, row) {
+      // Art for the row: the artist with the most tracks on it.
+      row.artistName = (item.artists && item.artists[0]) || null;
+      var saved = savedPlaylistFor(item.id);
+      if (!saved) {
+        row.actions = ["play-mixtape", "save-mixtape", "page"];
+      } else if (savedVersion(saved) < item.version) {
+        row.badge = { label: "Update", variant: "accent" };
+        row.actions = ["play-mixtape", "update-mixtape", "page"];
+      } else {
+        row.badge = { label: "Saved", variant: "success" };
+        row.actions = ["play-mixtape", "page"];
+      }
+      return row;
+    },
+    // The badges above need the saved playlists, so read them with the list.
+    load: function () {
+      return loadPlaylists().then(function () {
+        return loadList("mixtape", 0);
+      });
+    },
+    mine: {
+      title: "Your playlists",
+      load: function () {
+        return loadPlaylists();
+      },
+      nodes: function () {
+        return myPlaylistNodes();
       },
     },
   },
@@ -513,17 +606,17 @@ function loadList(kind, page) {
   });
 }
 
-// The current module's tab: its integration's own load, else the generic list
-// (fetched once; search, sort and paging refetch).
+// The current module's tab: its integration's own load, else the generic list.
+// Every visit refetches the first page — the rows already shown stay up while
+// it loads — so what changed since (a mixtape republished, a sheet updated)
+// shows without a restart.
 function loadTab() {
   var m = currentModule();
   if (!m) return Promise.resolve(render());
   var integration = INTEGRATIONS[m.kind];
   var custom = integration && integration.load ? integration.load() : null;
   if (custom) return custom;
-  if (!browseState(m.kind).items) return loadList(m.kind, 0);
-  render();
-  return Promise.resolve();
+  return loadList(m.kind, 0);
 }
 
 // What this user shared, per module.
@@ -585,7 +678,7 @@ function pageFor(id) {
 // ---------------------------------------------------------------------------
 
 function cueModule() {
-  return moduleFor("cue_sheet") || BUILTIN_MODULES[0];
+  return knownModule("cue_sheet");
 }
 
 function loadSong(song) {
@@ -778,12 +871,12 @@ function mySheetNodes() {
       selectionMode: "single",
       artwork: "cached",
       contextMenu: false,
-      actions: [
+      actions: withIcons([
         { id: "publish", label: "Publish" },
         { id: "republish", label: "Update online" },
         { id: "unpublish", label: "Unpublish" },
         { id: "sheet-page", label: "Open page" },
-      ],
+      ]),
       items: rows.map(function (sheet) {
         var key = songKey(sheet.title, sheet.artistName);
         return localRow(sheet, sharedSheet(key), state.imports[key]);
@@ -792,20 +885,324 @@ function mySheetNodes() {
   ];
 }
 
-// A share link (viboplr://plugin/community/open?id=…): show the song, ask to import.
+// A share link (viboplr://plugin/community/open?id=…). A cue sheet shows its
+// song and asks to import; a mixtape opens its tab and asks to save.
 function openShared(id) {
   if (!id) return Promise.resolve();
   api.ui.navigateToView(VIEW);
   return request("GET", "/v1/items/" + encodeURIComponent(id))
     .then(function (data) {
       var item = data.item;
+      if (item.kind === "mixtape") {
+        state.tab = "mixtape";
+        state.confirm = { kind: "save-mixtape", id: item.id, title: item.title, by: item.publisher.login, count: payloadTracks(item).length };
+        return loadTab();
+      }
       state.confirm = { kind: "import", id: item.id, title: item.title, artist: item.artistName, by: item.publisher.login };
       return showSong({ title: item.title, artist: item.artistName });
     })
     .catch(function (e) {
-      if (e && e.status === 404) notify("That cue sheet isn't in the community any more.");
-      else fail("Couldn't open that cue sheet", e);
+      if (e && e.status === 404) notify("That isn't in the community any more.");
+      else fail("Couldn't open that link", e);
     });
+}
+
+// ---------------------------------------------------------------------------
+// Mixtapes
+// ---------------------------------------------------------------------------
+
+function mixtapeKey(name) {
+  return "mixtape:" + fold(name);
+}
+
+// Any track shape we hold (a playlist row, a queue entry, a published track)
+// → what a mixtape carries. Metadata only: no path, URI or image, ever.
+function mixtapeTracks(tracks) {
+  var out = [];
+  (tracks || []).forEach(function (t) {
+    var title = t && typeof t.title === "string" ? t.title.trim() : "";
+    if (!title) return;
+    var artist = t.artistName !== undefined ? t.artistName : t.artist_name;
+    var album = t.albumName !== undefined ? t.albumName : t.album_title;
+    var secs = t.durationSecs !== undefined ? t.durationSecs : t.duration_secs;
+    out.push({
+      title: title,
+      artistName: artist || null,
+      albumName: album || null,
+      durationSecs: typeof secs === "number" && secs > 0 ? secs : null,
+    });
+  });
+  return out;
+}
+
+function hasPlaylistsApi() {
+  return !!(api.playlists && typeof api.playlists.list === "function");
+}
+
+function loadPlaylists() {
+  if (!hasPlaylistsApi()) {
+    state.playlists = [];
+    return Promise.resolve();
+  }
+  return api.playlists
+    .list()
+    .then(function (rows) {
+      state.playlists = rows || [];
+    })
+    .catch(function (e) {
+      // Not fatal: the tab still lists and plays mixtapes, just without badges.
+      api.log("error", "Couldn't read your playlists: " + errorText(e));
+      state.playlists = [];
+    });
+}
+
+function communityMeta(playlist) {
+  var m = playlist && playlist.metadata;
+  return m && typeof m.communityId === "string" ? m : null;
+}
+
+function savedVersion(playlist) {
+  var m = communityMeta(playlist);
+  return m && typeof m.communityVersion === "number" ? m.communityVersion : 0;
+}
+
+function savedPlaylistFor(id) {
+  var rows = state.playlists || [];
+  for (var i = 0; i < rows.length; i++) {
+    var m = communityMeta(rows[i]);
+    if (m && m.communityId === id) return rows[i];
+  }
+  return null;
+}
+
+function sharedMixtape(name) {
+  var key = mixtapeKey(name);
+  var list = state.shared.mixtape || [];
+  for (var i = 0; i < list.length; i++) if (mixtapeKey(list[i].title) === key) return list[i];
+  return null;
+}
+
+function fetchItem(id) {
+  return request("GET", "/v1/items/" + encodeURIComponent(id)).then(function (data) {
+    return data.item;
+  });
+}
+
+function payloadTracks(item) {
+  return mixtapeTracks(item && item.payload && item.payload.tracks);
+}
+
+function playMixtape(id) {
+  if (!api.playback || typeof api.playback.playTracks !== "function") {
+    notify("This version of Viboplr can't play a mixtape from here. Save it to your Playlists instead.");
+    return Promise.resolve();
+  }
+  return fetchItem(id)
+    .then(function (item) {
+      var tracks = payloadTracks(item);
+      if (!tracks.length) {
+        notify("That mixtape has no tracks.");
+        return;
+      }
+      api.playback.playTracks(
+        tracks.map(function (t) {
+          return { title: t.title, artist_name: t.artistName, album_title: t.albumName, duration_secs: t.durationSecs };
+        }),
+        0,
+        { name: item.title, source: "playlist", description: (item.payload && item.payload.description) || null }
+      );
+      countUse(item.id);
+    })
+    .catch(function (e) {
+      if (e && e.status === 404) notify("That mixtape isn't in the community any more.");
+      else fail("Couldn't play that mixtape", e);
+    });
+}
+
+// Save a community mixtape as a playlist. A newer version replaces the copy
+// saved before (the new one is written first, so a failure loses nothing).
+function saveMixtape(id) {
+  if (!hasPlaylistsApi() || typeof api.playlists.save !== "function") {
+    notify("This version of Viboplr can't save playlists from a plugin.");
+    return Promise.resolve();
+  }
+  return Promise.all([fetchItem(id), state.playlists ? Promise.resolve() : loadPlaylists()])
+    .then(function (vals) {
+      var item = vals[0];
+      var previous = savedPlaylistFor(item.id);
+      if (previous && savedVersion(previous) >= item.version) {
+        notify("“" + item.title + "” is already in your Playlists.");
+        return;
+      }
+      var tracks = payloadTracks(item);
+      if (!tracks.length) {
+        notify("That mixtape has no tracks.");
+        return;
+      }
+      var by = item.publisher && item.publisher.login ? item.publisher.login : null;
+      return api.playlists
+        .save({
+          name: item.title,
+          description: (item.payload && item.payload.description) || undefined,
+          metadata: { communityId: item.id, communityVersion: item.version, communityBy: by },
+          tracks: tracks.map(function (t) {
+            return { title: t.title, artistName: t.artistName || undefined, albumName: t.albumName || undefined, durationSecs: t.durationSecs || undefined };
+          }),
+        })
+        .then(function () {
+          return previous ? api.playlists.delete(previous.id) : null;
+        })
+        .then(function () {
+          if (!previous) countUse(item.id);
+          return loadPlaylists();
+        })
+        .then(function () {
+          notify((previous ? "Updated “" : "Saved “") + item.title + "” in your Playlists.");
+          render();
+        });
+    })
+    .catch(function (e) {
+      if (e && e.status === 404) notify("That mixtape isn't in the community any more.");
+      else fail("Couldn't save that mixtape", e);
+    });
+}
+
+function publishMixtape(name, description, tracks) {
+  var list = mixtapeTracks(tracks);
+  if (!list.length) {
+    notify("There's nothing to publish: “" + name + "” has no tracks.");
+    return Promise.resolve();
+  }
+  return request("POST", "/v1/items", { kind: "mixtape", title: name, description: description || undefined, tracks: list }, true).then(function (data) {
+    var shared = (state.shared.mixtape || []).filter(function (it) {
+      return it.id !== data.item.id;
+    });
+    state.shared.mixtape = shared.concat([data.item]);
+    state.lastPublishedUrl = data.item.url;
+    notify((data.created ? "Published “" : "Updated “") + name + "” on Viboplr Community.", {
+      action: { label: "Open page", id: "open-last-published" },
+    });
+    render();
+  });
+}
+
+function playlistById(id) {
+  var rows = state.playlists || [];
+  for (var i = 0; i < rows.length; i++) if (String(rows[i].id) === String(id)) return rows[i];
+  return null;
+}
+
+function publishPlaylist(id, fallbackName) {
+  if (!requireSignIn("publish")) return Promise.resolve();
+  if (!hasPlaylistsApi()) {
+    notify("This version of Viboplr doesn't let plugins read playlists.");
+    return Promise.resolve();
+  }
+  var read = state.playlists ? Promise.resolve() : loadPlaylists();
+  return read
+    .then(function () {
+      var playlist = playlistById(id);
+      if (playlist && communityMeta(playlist)) {
+        notify("This playlist came from the community, so it isn't yours to publish.");
+        return;
+      }
+      var name = (playlist && playlist.name) || fallbackName;
+      return api.playlists.getTracks(Number(id)).then(function (tracks) {
+        return publishMixtape(name, playlist && playlist.description, tracks);
+      });
+    })
+    .catch(function (e) {
+      fail("Couldn't publish", e);
+    });
+}
+
+function publishQueue(name) {
+  name = String(name || "").trim();
+  if (!name) {
+    notify("Give the mixtape a name first.");
+    return Promise.resolve();
+  }
+  if (!requireSignIn("publish")) return Promise.resolve();
+  var queue = api.playback && typeof api.playback.getQueue === "function" ? api.playback.getQueue() : null;
+  if (!queue || !queue.tracks || !queue.tracks.length) {
+    notify("The queue is empty.");
+    return Promise.resolve();
+  }
+  return publishMixtape(name, null, queue.tracks).catch(function (e) {
+    fail("Couldn't publish", e);
+  });
+}
+
+function unpublishMixtape(name) {
+  var item = sharedMixtape(name);
+  if (!item) return Promise.resolve();
+  return request("DELETE", "/v1/items/" + encodeURIComponent(item.id), undefined, true)
+    .then(function () {
+      state.shared.mixtape = (state.shared.mixtape || []).filter(function (it) {
+        return it.id !== item.id;
+      });
+      notify("Unpublished “" + item.title + "”. Your playlist is unchanged.");
+      render();
+    })
+    .catch(function (e) {
+      fail("Couldn't unpublish", e);
+    });
+}
+
+// One saved playlist → a row in Mine, given what the user published.
+function playlistRow(playlist, published) {
+  var bits = [plural(playlist.trackCount || 0, "track", "tracks")];
+  var row = { id: String(playlist.id), title: playlist.name, subtitle: "", actions: [] };
+  var from = communityMeta(playlist);
+  if (from) {
+    if (from.communityBy) bits.push("by @" + from.communityBy);
+    row.badge = { label: "From the community", variant: "muted" };
+  } else if (published) {
+    row.badge = { label: "Published", variant: "success" };
+    row.actions = ["republish-playlist", "unpublish-mixtape", "mixtape-page"];
+  } else {
+    row.actions = ["publish-playlist"];
+  }
+  row.subtitle = bits.join(" · ");
+  return row;
+}
+
+// The playlists Mine offers: the user's own, with tracks. Liked/Disliked and
+// the mixes the app regenerates (`systemKind`, newer hosts) aren't "yours" in
+// that sense — though one already published stays, so it can be unpublished.
+// Right-click → Publish still works on any playlist; that's an explicit ask.
+function minePlaylists() {
+  return (state.playlists || []).filter(function (p) {
+    if (!communityMeta(p) && sharedMixtape(p.name)) return true;
+    return !p.systemKind && (p.trackCount || 0) > 0;
+  });
+}
+
+function myPlaylistNodes() {
+  var nodes = [];
+  var rows = minePlaylists();
+  if (rows.length === 0) {
+    nodes.push({ type: "text", content: "You have no saved playlists yet. Save one from the queue, or save a mixtape someone shared." });
+  } else {
+    nodes.push({
+      type: "track-row-list",
+      selectable: true,
+      selectionMode: "single",
+      contextMenu: false,
+      actions: withIcons([
+        { id: "publish-playlist", label: "Publish" },
+        { id: "republish-playlist", label: "Update online" },
+        { id: "unpublish-mixtape", label: "Unpublish" },
+        { id: "mixtape-page", label: "Open page" },
+      ]),
+      items: rows.map(function (p) {
+        return playlistRow(p, communityMeta(p) ? null : sharedMixtape(p.name));
+      }),
+    });
+  }
+  nodes.push({ type: "text", content: "Or publish what's in the queue right now:", className: "ds-muted" });
+  nodes.push({ type: "search-input", placeholder: "Name the mixtape", action: "publish-queue", value: "", submitOnly: true, buttonLabel: "Publish the queue" });
+  return nodes;
 }
 
 // ---------------------------------------------------------------------------
@@ -818,7 +1215,7 @@ function addServer(id) {
   if (!api.collections || typeof api.collections.requestAdd !== "function") {
     // Older app: the website's Add button opens the same dialog by deep link.
     var listed = knownItem(id);
-    return api.network.openUrl(listed ? listed.url : (moduleFor("subsonic_server") || BUILTIN_MODULES[1]).url + "/" + encodeURIComponent(id));
+    return api.network.openUrl(listed ? listed.url : knownModule("subsonic_server").url + "/" + encodeURIComponent(id));
   }
   var known = knownItem(id);
   var item = known
@@ -879,7 +1276,7 @@ function listNode(m, items) {
     selectionMode: "single",
     artwork: "cached",
     contextMenu: false,
-    actions: (integration.actions || []).concat([{ id: "page", label: "Open page" }]),
+    actions: withIcons((integration.actions || []).concat([{ id: "page", label: "Open page" }])),
     items: items.map(function (item) {
       return cardRow(m, item);
     }),
@@ -965,7 +1362,7 @@ function sharedNodes(m) {
       selectable: true,
       selectionMode: "single",
       contextMenu: false,
-      actions: actions,
+      actions: withIcons(actions),
       items: mine.map(function (item) {
         var row = cardRow(m, item);
         row.actions = actions.map(function (a) {
@@ -979,6 +1376,17 @@ function sharedNodes(m) {
 
 function confirmNode() {
   var c = state.confirm;
+  if (c.kind === "save-mixtape") {
+    return {
+      type: "confirm",
+      title: "Save this mixtape?",
+      message: "@" + c.by + "'s mixtape “" + c.title + "” (" + plural(c.count, "track", "tracks") + ") will be added to your Playlists. You can also just play it from the list below.",
+      confirmLabel: "Save to Playlists",
+      confirmAction: "confirm-save-mixtape",
+      cancelAction: "cancel-confirm",
+      data: { id: c.id },
+    };
+  }
   var song = "“" + c.title + "”" + (c.artist ? " by " + c.artist : "");
   if (c.kind === "replace") {
     return {
@@ -1116,6 +1524,40 @@ var ACTIONS = {
     state.confirm = null;
     render();
   },
+  // --- mixtapes ---
+  "play-mixtape": function (p) {
+    return playMixtape(rowId(p));
+  },
+  "save-mixtape": function (p) {
+    return saveMixtape(rowId(p));
+  },
+  "update-mixtape": function (p) {
+    return saveMixtape(rowId(p));
+  },
+  "confirm-save-mixtape": function (p) {
+    state.confirm = null;
+    render();
+    return saveMixtape(p && p.id);
+  },
+  "publish-playlist": function (p) {
+    var playlist = playlistById(rowId(p));
+    return playlist ? publishPlaylist(playlist.id, playlist.name) : Promise.resolve();
+  },
+  "republish-playlist": function (p) {
+    return ACTIONS["publish-playlist"](p);
+  },
+  "unpublish-mixtape": function (p) {
+    var playlist = playlistById(rowId(p));
+    return playlist ? unpublishMixtape(playlist.name) : Promise.resolve();
+  },
+  "mixtape-page": function (p) {
+    var playlist = playlistById(rowId(p));
+    var item = playlist && sharedMixtape(playlist.name);
+    return item ? api.network.openUrl(item.url) : Promise.resolve();
+  },
+  "publish-queue": function (p) {
+    return publishQueue(p && p.query);
+  },
   // --- servers ---
   "add-server": function (p) {
     return addServer(rowId(p));
@@ -1164,6 +1606,10 @@ function activate(pluginApi) {
   api.contextMenu.onAction("publish-cues", function (target) {
     if (!target || !target.title) return;
     return publishSong(target.title, target.artistName || null);
+  });
+  api.contextMenu.onAction("publish-mixtape", function (target) {
+    if (!target || target.playlistId === undefined || target.playlistId === null) return;
+    return publishPlaylist(target.playlistId, target.playlistName || "Untitled mixtape");
   });
   api.network.onDeepLink(onDeepLink);
 
@@ -1217,6 +1663,8 @@ return {
     return cardRow(m, item);
   },
   _localRow: localRow,
+  _mixtapeTracks: mixtapeTracks,
+  _playlistRow: playlistRow,
   _builtinModules: BUILTIN_MODULES,
   _loadModules: function () {
     return loadModules();

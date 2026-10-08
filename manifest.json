@@ -1,32 +1,48 @@
 {
   "id": "community",
   "name": "Viboplr Community",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Viboplr",
-  "description": "Share your Now Playing cue sheets on Viboplr Community and import ones other people made, and add the Subsonic / Navidrome servers their owners opened to everyone. Sign in with GitHub to publish; browsing, importing and adding need no account.",
+  "description": "Share your Now Playing cue sheets and your playlists (as mixtapes) on Viboplr Community, and play or import what other people made. Add the Subsonic / Navidrome servers their owners opened to everyone. Sign in with GitHub to publish; browsing, playing, importing and adding need no account.",
   "minAppVersion": "1.0.93",
   "stability": "experimental",
   "homepage": "https://github.com/outcast1000/viboplr-community-plugin",
   "updateUrl": "https://github.com/outcast1000/viboplr-community-plugin/releases/latest/download/update.json",
   "icon": "M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7M16 6l-4-4-4 4M12 2v13",
   "runtime": "worker",
-  "permissions": ["network:community.viboplr.com", "system:open", "cues:read", "cues:write", "playback:read"],
+  "permissions": [
+    "network:community.viboplr.com",
+    "system:open",
+    "cues:read",
+    "cues:write",
+    "playback:read",
+    "playback:control",
+    "library:read",
+    "library:write"
+  ],
   "apiUsage": [
-    { "api": "network.fetch", "reason": "Browse, import and publish cue sheets on community.viboplr.com" },
-    { "api": "network.openUrl", "reason": "Sign in with GitHub in your browser, and open a sheet's page on the server" },
+    { "api": "network.fetch", "reason": "Browse, import and publish on community.viboplr.com" },
+    { "api": "network.openUrl", "reason": "Sign in with GitHub in your browser, and open an item's page on the server" },
     { "api": "cues.set", "reason": "Install a cue sheet you chose to import" },
     { "api": "cues.list", "reason": "List your own sheets so you can publish them" },
     { "api": "playback.getCurrentTrack", "reason": "Find shared sheets for the song that's playing" },
+    { "api": "playback.getQueue", "reason": "Publish the queue as a mixtape, when you ask to" },
+    { "api": "playback.playTracks", "reason": "Play a mixtape you chose" },
+    { "api": "playlists.list", "reason": "List your playlists so you can publish them, and know which mixtapes you saved" },
+    { "api": "playlists.getTracks", "reason": "Read the track list of a playlist you publish (titles and artists only, never file paths)" },
+    { "api": "playlists.save", "reason": "Save a mixtape you chose to your Playlists" },
+    { "api": "playlists.delete", "reason": "Replace a saved mixtape with its newer version, when you update it" },
     { "api": "collections.requestAdd", "reason": "Open the app's Add Server dialog for a listed server — you confirm there" }
   ],
-  "viewHeader": { "subtitle": "Cue sheets and servers shared by Viboplr users" },
+  "viewHeader": { "subtitle": "Cue sheets, mixtapes and servers shared by Viboplr users" },
   "contributes": {
     "sidebarItems": [
       { "id": "community", "label": "Community", "icon": "M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7M16 6l-4-4-4 4M12 2v13" }
     ],
     "contextMenuItems": [
       { "id": "find-cues", "label": "Find shared cue sheets", "targets": ["track"] },
-      { "id": "publish-cues", "label": "Publish cue sheet…", "targets": ["track"] }
+      { "id": "publish-cues", "label": "Publish cue sheet…", "targets": ["track"] },
+      { "id": "publish-mixtape", "label": "Publish as a mixtape…", "targets": ["playlist"] }
     ]
   }
 }
