@@ -27,6 +27,9 @@
 //    a copy. A saved mixtape remembers where it came from in its playlist
 //    `metadata` ({ communityId, communityVersion }), so Mine can tell it apart
 //    from the user's own and the tab can offer an update.
+//  - AN IMPORT IS A ONE-OFF WRITE. Shared synced lyrics become the song's
+//    lyrics through api.lyrics.save, like an edit in the app; the plugin is not
+//    a lyrics provider and looks nothing up while anyone listens.
 //  - NOT READY IS A BANNER. A server that can't be reached is shown inside the
 //    view with a Retry, never as a toast (plugin view design guidelines).
 
@@ -79,6 +82,10 @@ function freshState() {
     // --- mixtapes ---
     // api.playlists.list() rows; null until read.
     playlists: null,
+    // --- synced lyrics ---
+    // songKey → { id, version, title, artist, by, url } for lyrics imported
+    // from the community (the text itself is the app's, via api.lyrics.save).
+    lyricsImports: {},
   };
 }
 
@@ -173,6 +180,17 @@ var BUILTIN_MODULES = [
     shareUrl: null,
   },
   {
+    kind: "synced_lyrics",
+    slug: "lyrics",
+    name: "Synced lyrics",
+    singular: "lyric sheet",
+    notice: "",
+    popularLabel: "Most imported",
+    useNoun: ["import", "imports"],
+    url: SERVER + "/lyrics",
+    shareUrl: null,
+  },
+  {
     kind: "mixtape",
     slug: "mixtapes",
     name: "Mixtapes",
@@ -246,6 +264,11 @@ var ACTION_ICONS = {
   "unpublish-mixtape": "✕",
   "mixtape-page": "↗",
   "add-server": "＋",
+  "import-lyrics": "⬇",
+  "update-lyrics": "↻",
+  "remove-lyrics": "✕",
+  "unpublish-lyrics": "✕",
+  "lyrics-page": "↗",
 };
 
 function withIcons(actions) {
@@ -334,6 +357,35 @@ var INTEGRATIONS = {
       },
       nodes: function () {
         return mySheetNodes();
+      },
+    },
+  },
+  synced_lyrics: {
+    actions: [
+      { id: "import-lyrics", label: "Import" },
+      { id: "update-lyrics", label: "Update" },
+    ],
+    row: function (item, row) {
+      row.artistName = item.artistName || null;
+      row.albumTitle = item.albumName || null;
+      var imported = state.lyricsImports[songKey(item.title, item.artistName)];
+      if (imported && imported.id === item.id) {
+        if (imported.version < item.version) {
+          row.badge = { label: "Update", variant: "accent" };
+          row.actions = ["update-lyrics", "page"];
+        } else {
+          row.badge = { label: "Imported", variant: "success" };
+          row.actions = ["page"];
+        }
+      } else {
+        row.actions = ["import-lyrics", "page"];
+      }
+      return row;
+    },
+    mine: {
+      title: "Synced lyrics",
+      nodes: function () {
+        return myLyricsNodes();
       },
     },
   },
@@ -898,6 +950,10 @@ function openShared(id) {
         state.confirm = { kind: "save-mixtape", id: item.id, title: item.title, by: item.publisher.login, count: payloadTracks(item).length };
         return loadTab();
       }
+      if (item.kind === "synced_lyrics") {
+        state.confirm = { kind: "import-lyrics", id: item.id, title: item.title, artist: item.artistName, by: item.publisher.login };
+        return findLyrics(item.title, item.artistName);
+      }
       state.confirm = { kind: "import", id: item.id, title: item.title, artist: item.artistName, by: item.publisher.login };
       return showSong({ title: item.title, artist: item.artistName });
     })
@@ -905,6 +961,248 @@ function openShared(id) {
       if (e && e.status === 404) notify("That isn't in the community any more.");
       else fail("Couldn't open that link", e);
     });
+}
+
+// ---------------------------------------------------------------------------
+// Synced lyrics
+// ---------------------------------------------------------------------------
+//
+// Importing is a one-off act: the shared LRC becomes the song's lyrics through
+// the host's api.lyrics.save — the same write as editing them in the app — and
+// from then on the app shows it like any lyrics it has. The plugin is not a
+// lyrics provider and looks nothing up while anyone listens. It only remembers
+// which songs it imported (and which version), for the Imported / Update
+// badges and for Undo, which hands the song back to the user's provider chain.
+
+function trackEntity(title, artist, album) {
+  var e = { kind: "track", name: title };
+  if (artist) e.artistName = artist;
+  if (album) e.albumTitle = album;
+  return e;
+}
+
+function canFetchInfo() {
+  return !!(api.informationTypes && typeof api.informationTypes.fetch === "function");
+}
+
+function canSaveLyrics() {
+  return !!(api.lyrics && typeof api.lyrics.save === "function");
+}
+
+// The lyrics the app has for a song (its cache first, else its providers), or null.
+function currentLyrics(title, artist) {
+  if (!canFetchInfo()) return Promise.resolve(null);
+  return api.informationTypes
+    .fetch("lyrics", trackEntity(title, artist))
+    .then(function (out) {
+      return out && out.status === "ok" && out.value ? out.value : null;
+    })
+    .catch(function (e) {
+      api.log("warn", "Couldn't read the lyrics for " + title + ": " + errorText(e));
+      return null;
+    });
+}
+
+function lyricsSource(value) {
+  if (value && value.local) return "a lyrics file next to the song";
+  return value && value._meta && value._meta.providerName ? value._meta.providerName : null;
+}
+
+// Import community lyrics. Asks first when the song already has synced lyrics
+// that didn't come from this same item.
+function importLyrics(id, confirmed) {
+  if (!canSaveLyrics()) {
+    notify("Importing synced lyrics needs Viboplr 1.0.94 or later.");
+    return Promise.resolve();
+  }
+  return fetchItem(id)
+    .then(function (item) {
+      var key = songKey(item.title, item.artistName);
+      var lrc = item.payload && item.payload.lrc;
+      if (!lrc) {
+        notify("Those lyrics are empty.");
+        return;
+      }
+      var rec = state.lyricsImports[key];
+      var ours = rec && rec.id === item.id;
+      var check = confirmed || ours ? Promise.resolve(null) : currentLyrics(item.title, item.artistName);
+      return check.then(function (existing) {
+        if (existing && existing.kind === "synced" && !confirmed) {
+          state.confirm = {
+            kind: "replace-lyrics",
+            id: item.id,
+            title: item.title,
+            artist: item.artistName,
+            by: item.publisher.login,
+            from: lyricsSource(existing),
+          };
+          render();
+          return;
+        }
+        return api.lyrics
+          .save({ title: item.title, artistName: item.artistName || null, albumTitle: item.albumName || null }, { text: lrc, kind: "synced" })
+          .then(function () {
+            state.lyricsImports[key] = {
+              id: item.id,
+              version: item.version,
+              title: item.title,
+              artist: item.artistName || null,
+              by: item.publisher && item.publisher.login,
+              url: item.url,
+            };
+            return api.storage.set("lyricsImports", state.lyricsImports);
+          })
+          .then(function () {
+            countUse(item.id);
+            notify("Imported synced lyrics for “" + item.title + "”. They scroll along in Now Playing.");
+            render();
+          });
+      });
+    })
+    .catch(function (e) {
+      if (e && e.status === 404) notify("Those lyrics aren't in the community any more.");
+      else fail("Couldn't import those lyrics", e);
+    });
+}
+
+// Undo an import: forget it, and ask the user's providers for the song again,
+// so whatever the app would have shown comes back.
+function removeLyrics(key) {
+  var rec = state.lyricsImports[key];
+  if (!rec) return Promise.resolve();
+  delete state.lyricsImports[key];
+  return api.storage
+    .set("lyricsImports", state.lyricsImports)
+    .then(function () {
+      if (!canFetchInfo()) return null;
+      return api.informationTypes.fetch("lyrics", trackEntity(rec.title, rec.artist), { force: true });
+    })
+    .then(function () {
+      notify("Undid the import of “" + rec.title + "”. It shows the lyrics your providers find again.");
+      render();
+    })
+    .catch(function (e) {
+      fail("Couldn't undo that import", e);
+    });
+}
+
+function sharedLyrics(key) {
+  var list = state.shared.synced_lyrics || [];
+  for (var i = 0; i < list.length; i++) if (songKey(list[i].title, list[i].artistName) === key) return list[i];
+  return null;
+}
+
+// Publish the synced lyrics the app has for a song, wherever they came from —
+// a lyrics site, a file next to the song, an edit, an earlier import.
+function publishLyrics(title, artist, album) {
+  if (!requireSignIn("publish")) return Promise.resolve();
+  if (!canFetchInfo()) {
+    notify("This version of Viboplr doesn't let plugins read lyrics.");
+    return Promise.resolve();
+  }
+  return currentLyrics(title, artist)
+    .then(function (value) {
+      if (!value || typeof value.text !== "string" || !value.text.trim()) {
+        notify("There are no lyrics for “" + title + "” to publish.");
+        return;
+      }
+      if (value.kind !== "synced") {
+        notify("“" + title + "” only has plain lyrics. Only synced lyrics can be shared.");
+        return;
+      }
+      var body = { kind: "synced_lyrics", title: title, artistName: artist || undefined, albumName: album || undefined, lrc: value.text };
+      var now = api.playback && api.playback.getCurrentTrack ? api.playback.getCurrentTrack() : null;
+      if (now && songKey(now.title, now.artist_name) === songKey(title, artist) && now.duration_secs) body.durationSecs = now.duration_secs;
+      return request("POST", "/v1/items", body, true).then(function (data) {
+        var list = (state.shared.synced_lyrics || []).filter(function (it) {
+          return it.id !== data.item.id;
+        });
+        state.shared.synced_lyrics = list.concat([data.item]);
+        state.lastPublishedUrl = data.item.url;
+        notify((data.created ? "Published the synced lyrics for “" : "Updated the synced lyrics for “") + title + "”.", {
+          action: { label: "Open page", id: "open-last-published" },
+        });
+        render();
+      });
+    })
+    .catch(function (e) {
+      fail("Couldn't publish", e);
+    });
+}
+
+function unpublishLyrics(key) {
+  var item = sharedLyrics(key);
+  if (!item) return Promise.resolve();
+  return request("DELETE", "/v1/items/" + encodeURIComponent(item.id), undefined, true)
+    .then(function () {
+      state.shared.synced_lyrics = (state.shared.synced_lyrics || []).filter(function (it) {
+        return it.id !== item.id;
+      });
+      notify("Unpublished the synced lyrics for “" + item.title + "”. Your own copy is unchanged.");
+      render();
+    })
+    .catch(function (e) {
+      fail("Couldn't unpublish", e);
+    });
+}
+
+// Search the Synced lyrics tab for one song (context menu).
+function findLyrics(title, artist) {
+  state.tab = "synced_lyrics";
+  state.error = null;
+  browseState("synced_lyrics").query = (artist ? artist + " " : "") + title;
+  return loadList("synced_lyrics", 0);
+}
+
+function myLyricsNodes() {
+  var rows = [];
+  Object.keys(state.lyricsImports).forEach(function (key) {
+    var rec = state.lyricsImports[key];
+    rows.push({
+      id: "imported:" + key,
+      title: rec.title,
+      subtitle: [rec.artist, rec.by ? "by @" + rec.by : null].filter(Boolean).join(" · "),
+      artistName: rec.artist || null,
+      badge: { label: "Imported", variant: "muted" },
+      actions: ["remove-lyrics", "lyrics-page"],
+    });
+  });
+  (state.shared.synced_lyrics || []).forEach(function (item) {
+    rows.push({
+      id: "published:" + songKey(item.title, item.artistName),
+      title: item.title,
+      subtitle: [item.artistName, plural(item.lineCount || 0, "line", "lines")].filter(Boolean).join(" · "),
+      artistName: item.artistName || null,
+      albumTitle: item.albumName || null,
+      badge: { label: "Published", variant: "success" },
+      actions: ["unpublish-lyrics", "lyrics-page"],
+    });
+  });
+  if (!rows.length) {
+    return [{ type: "text", content: "No synced lyrics yet. Right-click a track to publish its synced lyrics, or import some from the Synced lyrics tab." }];
+  }
+  return [
+    {
+      type: "track-row-list",
+      selectable: true,
+      selectionMode: "single",
+      artwork: "cached",
+      contextMenu: false,
+      actions: withIcons([
+        { id: "remove-lyrics", label: "Undo import" },
+        { id: "unpublish-lyrics", label: "Unpublish" },
+        { id: "lyrics-page", label: "Open page" },
+      ]),
+      items: rows,
+    },
+  ];
+}
+
+// A Mine row id → its song key and which list it came from.
+function lyricsRowKey(id) {
+  var s = String(id || "");
+  var i = s.indexOf(":");
+  return i === -1 ? null : { list: s.slice(0, i), key: s.slice(i + 1) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1387,6 +1685,31 @@ function sharedNodes(m) {
 
 function confirmNode() {
   var c = state.confirm;
+  var forSong = "“" + c.title + "”" + (c.artist ? " by " + c.artist : "");
+  if (c.kind === "import-lyrics") {
+    return {
+      type: "confirm",
+      title: "Import these synced lyrics?",
+      message: "@" + c.by + "'s synced lyrics for " + forSong + " will scroll along in Now Playing.",
+      confirmLabel: "Import",
+      confirmAction: "confirm-import-lyrics",
+      cancelAction: "cancel-confirm",
+      data: { id: c.id },
+    };
+  }
+  if (c.kind === "replace-lyrics") {
+    return {
+      type: "confirm",
+      title: "Use these synced lyrics instead?",
+      message:
+        forSong + " already has synced lyrics" + (c.from ? " (from " + c.from + ")" : "") + ". Importing @" + c.by +
+        "'s shows theirs instead — undo the import later (Community → Mine) and yours come back.",
+      confirmLabel: "Import",
+      confirmAction: "confirm-replace-lyrics",
+      cancelAction: "cancel-confirm",
+      data: { id: c.id },
+    };
+  }
   if (c.kind === "save-mixtape") {
     return {
       type: "confirm",
@@ -1535,6 +1858,37 @@ var ACTIONS = {
     state.confirm = null;
     render();
   },
+  // --- synced lyrics ---
+  "import-lyrics": function (p) {
+    return importLyrics(rowId(p), false);
+  },
+  "update-lyrics": function (p) {
+    return importLyrics(rowId(p), true);
+  },
+  "confirm-import-lyrics": function (p) {
+    state.confirm = null;
+    render();
+    return importLyrics(p && p.id, false);
+  },
+  "confirm-replace-lyrics": function (p) {
+    state.confirm = null;
+    render();
+    return importLyrics(p && p.id, true);
+  },
+  "remove-lyrics": function (p) {
+    var r = lyricsRowKey(rowId(p));
+    return r ? removeLyrics(r.key) : Promise.resolve();
+  },
+  "unpublish-lyrics": function (p) {
+    var r = lyricsRowKey(rowId(p));
+    return r ? unpublishLyrics(r.key) : Promise.resolve();
+  },
+  "lyrics-page": function (p) {
+    var r = lyricsRowKey(rowId(p));
+    if (!r) return Promise.resolve();
+    var rec = r.list === "imported" ? state.lyricsImports[r.key] : sharedLyrics(r.key);
+    return rec && rec.url ? api.network.openUrl(rec.url) : Promise.resolve();
+  },
   // --- mixtapes ---
   "play-mixtape": function (p) {
     return playMixtape(rowId(p));
@@ -1618,13 +1972,27 @@ function activate(pluginApi) {
     if (!target || !target.title) return;
     return publishSong(target.title, target.artistName || null);
   });
+  api.contextMenu.onAction("find-lyrics", function (target) {
+    if (!target || !target.title) return;
+    api.ui.navigateToView(VIEW);
+    return findLyrics(target.title, target.artistName || null);
+  });
+  api.contextMenu.onAction("publish-lyrics", function (target) {
+    if (!target || !target.title) return;
+    return publishLyrics(target.title, target.artistName || null, target.albumTitle || null);
+  });
   api.contextMenu.onAction("publish-mixtape", function (target) {
     if (!target || target.playlistId === undefined || target.playlistId === null) return;
     return publishPlaylist(target.playlistId, target.playlistName || "Untitled mixtape");
   });
   api.network.onDeepLink(onDeepLink);
 
-  var restored = Promise.all([api.storage.get("session"), api.storage.get("imports"), api.storage.get("modules")]).then(function (vals) {
+  var restored = Promise.all([
+    api.storage.get("session"),
+    api.storage.get("imports"),
+    api.storage.get("modules"),
+    api.storage.get("lyricsImports"),
+  ]).then(function (vals) {
     var session = vals[0];
     if (session && session.token) {
       state.token = session.token;
@@ -1636,6 +2004,7 @@ function activate(pluginApi) {
       state.modules = cached;
       state.tab = cached[0].kind;
     }
+    state.lyricsImports = vals[3] || {};
   });
   restored
     .catch(function (e) {

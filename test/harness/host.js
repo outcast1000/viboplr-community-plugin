@@ -3,7 +3,7 @@
 // network.fetch with `{ status, body }` (body is JSON-encoded) or undefined
 // for a 404.
 
-function makeHost({ route, current = null, queue = [] } = {}) {
+function makeHost({ route, current = null, queue = [], appVersion = "1.0.94" } = {}) {
   const host = {
     requests: [],
     opened: [],
@@ -22,6 +22,13 @@ function makeHost({ route, current = null, queue = [] } = {}) {
     playlists: new Map(),
     plays: [],
     queue,
+    // A small model of the host's lyrics: the user's provider chain
+    // (`webLyrics`) and the one cache Now Playing reads, which
+    // api.lyrics.save writes like the lyrics editor does.
+    lyricsCache: new Map(),
+    webLyrics: new Map(),
+    infoFetches: [],
+    lyricsSaves: [],
   };
   let nextPlaylistId = 1;
   const key = (title, artist) =>
@@ -29,6 +36,7 @@ function makeHost({ route, current = null, queue = [] } = {}) {
   let clock = 1000;
 
   host.api = {
+    appVersion,
     log: (level, message) => host.logs.push({ level, message }),
     network: {
       fetch: async (url, init = {}) => {
@@ -111,6 +119,25 @@ function makeHost({ route, current = null, queue = [] } = {}) {
           source: t.source ?? null,
           imagePath: null,
         })),
+    },
+    informationTypes: {
+      fetch: async (typeId, entity, opts = {}) => {
+        host.infoFetches.push({ typeId, entity, opts });
+        const k = key(entity.name, entity.artistName);
+        if (!opts.force && host.lyricsCache.has(k)) {
+          return { typeId, status: "ok", source: "cache", value: host.lyricsCache.get(k) };
+        }
+        const web = host.webLyrics.get(k);
+        if (web) host.lyricsCache.set(k, web);
+        else host.lyricsCache.delete(k);
+        return { typeId, status: web ? "ok" : "not_found", source: "fetch", value: web || null };
+      },
+    },
+    lyrics: {
+      save: async (track, lyrics) => {
+        host.lyricsSaves.push({ track, lyrics });
+        host.lyricsCache.set(key(track.title, track.artistName), { text: lyrics.text, kind: lyrics.kind });
+      },
     },
     collections: {
       requestAdd: async (source) => {

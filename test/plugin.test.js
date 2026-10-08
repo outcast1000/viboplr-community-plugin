@@ -315,13 +315,13 @@ test("tabs are one per module plus Mine, which has a section per module", async 
     { session: { token: "vcom_tok", user: { login: "alice" } } }
   );
   await host.addSheet("Jóga", "Björk", SHEET);
-  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["cue_sheet", "mixtape", "subsonic_server", "mine"]);
+  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["cue_sheet", "synced_lyrics", "mixtape", "subsonic_server", "mine"]);
 
   await host.actions.tab({ tabId: "mine" });
   const sections = nodes(host.lastView(), "section");
   // Cue sheets and mixtapes bring their own sections (what's on this computer); servers use the generic one.
-  assert.deepEqual(sections.map((n) => n.title), ["Cue sheets on this computer", "Your playlists", "Your servers"]);
-  const [sheets, , servers] = sections.map((n) => nodes({ children: n.children }, "track-row-list")[0]);
+  assert.deepEqual(sections.map((n) => n.title), ["Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your servers"]);
+  const [sheets, , , servers] = sections.map((n) => nodes({ children: n.children }, "track-row-list")[0]);
   assert.equal(sheets.items[0].badge.label, "Published", "matched against your cue sheets online");
   assert.equal(servers.items[0].title, "Jazz box");
   assert.deepEqual(servers.items[0].actions, ["page", "edit"]);
@@ -365,7 +365,7 @@ test("a module the plugin has never heard of still gets a working tab and Mine s
     { session: { token: "vcom_tok", user: { login: "bob" } } }
   );
   await plugin._loadModules();
-  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.label), ["Cue sheets", "Mixtapes", "Servers", "EQ presets", "Mine"]);
+  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.label), ["Cue sheets", "Synced lyrics", "Mixtapes", "Servers", "EQ presets", "Mine"]);
   assert.ok(host.storage.get("modules").some((m) => m.kind === "eq_preset"), "remembered for the next start");
 
   await host.actions.tab({ tabId: "eq_preset" });
@@ -379,7 +379,7 @@ test("a module the plugin has never heard of still gets a working tab and Mine s
 
   await host.actions.tab({ tabId: "mine" });
   const titles = nodes(host.lastView(), "section").map((n) => n.title);
-  assert.deepEqual(titles, ["Cue sheets on this computer", "Your playlists", "Your servers", "Your eq presets"]);
+  assert.deepEqual(titles, ["Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your servers", "Your eq presets"]);
 });
 
 // The built-in module descriptions as the server would send them.
@@ -392,7 +392,7 @@ test("a bad module list from the server is ignored, not fatal", async () => {
     if (u.pathname === "/v1/modules") return { body: { modules: [{ kind: 3 }, null, { name: "no kind" }] } };
   });
   await plugin._loadModules();
-  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["cue_sheet", "mixtape", "subsonic_server", "mine"]);
+  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["cue_sheet", "synced_lyrics", "mixtape", "subsonic_server", "mine"]);
 });
 
 // ---- mixtapes ---------------------------------------------------------------
@@ -581,4 +581,153 @@ test("a mixtape share link opens the Mixtapes tab and asks to save", async () =>
   assert.match(confirm.message, /@bob's mixtape “Late night” \(2 tracks\)/);
   await host.actions["confirm-save-mixtape"](confirm.data);
   assert.equal(host.playlists.size, 1);
+});
+
+// ---- synced lyrics ------------------------------------------------------------
+
+const LRC = "[00:01.00]One\n[00:02.00]Two\n[00:03.00]Three\n";
+const LYRICS_ITEM = {
+  id: "ly1",
+  kind: "synced_lyrics",
+  title: "Jóga",
+  artistName: "Björk",
+  albumName: "Homogenic",
+  lineCount: 3,
+  version: 1,
+  importCount: 0,
+  publisher: { login: "bob" },
+  url: "https://community.viboplr.com/lyrics/ly1",
+  card: { title: "Björk — Jóga", facts: ["3 lines"], action: { label: "Open in Viboplr", link: "viboplr://x" } },
+};
+
+function lyricsRoute(posted, at = { version: 1 }) {
+  return (u, init) => {
+    const item = { ...LYRICS_ITEM, version: at.version };
+    if (u.pathname === "/v1/items/ly1") return { body: { item: { ...item, payload: { lrc: LRC.replace("Three", "Three v" + at.version) } } } };
+    if (u.pathname === "/v1/items/search") return { body: { items: u.searchParams.get("kind") === "synced_lyrics" ? [item] : [], hasMore: false } };
+    if (u.pathname === "/v1/me/items") return { body: { items: [] } };
+    if (u.pathname === "/v1/items" && init.method === "POST") {
+      const body = JSON.parse(init.body);
+      posted.push(body);
+      return { status: 201, body: { created: true, item: { ...item, id: "mine1", publisher: { login: "alice" }, url: "https://community.viboplr.com/lyrics/mine1" } } };
+    }
+    if (u.pathname.endsWith("/imported")) return { status: 204 };
+  };
+}
+
+const JOGA_KEY = "track:bjork:joga";
+
+test("the plugin is not a lyrics provider", async () => {
+  const p = loadPlugin();
+  const manifest = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "manifest.json"), "utf8"));
+  assert.equal(manifest.contributes.informationTypes, undefined);
+  assert.ok(manifest.permissions.includes("lyrics:write"));
+  assert.equal(p._provideLyrics, undefined);
+});
+
+test("Import makes the shared lyrics the song's lyrics through api.lyrics.save", async () => {
+  const { host } = await setup(lyricsRoute([]));
+  host.webLyrics.set(JOGA_KEY, { text: "plain words", kind: "plain" });
+  await host.actions["import-lyrics"]({ itemId: "ly1" });
+  assert.deepEqual(host.lyricsSaves.map((s) => s.track), [{ title: "Jóga", artistName: "Björk", albumTitle: "Homogenic" }]);
+  assert.equal(host.lyricsSaves[0].lyrics.kind, "synced");
+  assert.match(host.lyricsCache.get(JOGA_KEY).text, /Three v1/);
+  assert.match(host.lastNotice().message, /scroll along in Now Playing/);
+  await flush();
+  assert.ok(host.requests.some((r) => r.url.endsWith("/v1/items/ly1/imported")), "an import counts");
+
+  await host.actions.tab({ tabId: "synced_lyrics" });
+  const row = nodes(host.lastView(), "track-row-list")[0].items[0];
+  assert.equal(row.badge.label, "Imported");
+});
+
+test("Import says which Viboplr it needs when the host can't save lyrics", async () => {
+  const { host } = await setup(lyricsRoute([]));
+  delete host.api.lyrics;
+  await host.actions["import-lyrics"]({ itemId: "ly1" });
+  assert.match(host.lastNotice().message, /1\.0\.94/);
+  assert.equal(host.lyricsCache.size, 0);
+});
+
+test("Import asks first when the song already has synced lyrics, and says where from", async () => {
+  const { host } = await setup(lyricsRoute([]));
+  host.webLyrics.set(JOGA_KEY, { text: "[00:01.00]theirs", kind: "synced", _meta: { providerName: "LRCLIB" } });
+  await host.actions["import-lyrics"]({ itemId: "ly1" });
+  const confirm = nodes(host.lastView(), "confirm")[0];
+  assert.equal(confirm.confirmAction, "confirm-replace-lyrics");
+  assert.match(confirm.message, /from LRCLIB/);
+  assert.equal(host.lyricsSaves.length, 0, "nothing changed yet");
+  await host.actions["confirm-replace-lyrics"](confirm.data);
+  assert.match(host.lyricsCache.get(JOGA_KEY).text, /Three v1/);
+});
+
+test("Undo hands the song back to the user's providers", async () => {
+  const { host } = await setup(lyricsRoute([]));
+  await host.actions["import-lyrics"]({ itemId: "ly1" });
+  host.webLyrics.set(JOGA_KEY, { text: "plain words", kind: "plain" });
+  await host.actions.tab({ tabId: "mine" });
+  const section = nodes(host.lastView(), "section").find((s) => s.title === "Synced lyrics");
+  const row = nodes({ children: section.children }, "track-row-list")[0].items[0];
+  assert.equal(row.badge.label, "Imported");
+  await host.actions["remove-lyrics"]({ itemId: row.id });
+  assert.equal(host.infoFetches.at(-1).opts.force, true, "re-walks the chain");
+  assert.equal(host.lyricsCache.get(JOGA_KEY).text, "plain words");
+  await host.actions.tab({ tabId: "synced_lyrics" });
+  assert.deepEqual(nodes(host.lastView(), "track-row-list")[0].items[0].actions, ["import-lyrics", "page"], "importable again");
+});
+
+test("a newer version offers Update, and Update saves the new text without asking", async () => {
+  const at = { version: 1 };
+  const { host } = await setup(lyricsRoute([], at));
+  await host.actions["import-lyrics"]({ itemId: "ly1" });
+  at.version = 2;
+  await host.actions.tab({ tabId: "mine" });
+  await host.actions.tab({ tabId: "synced_lyrics" });
+  const row = nodes(host.lastView(), "track-row-list")[0].items[0];
+  assert.equal(row.badge.label, "Update");
+  await host.actions["update-lyrics"]({ itemId: "ly1" });
+  assert.equal(nodes(host.lastView(), "confirm").length, 0);
+  assert.match(host.lyricsCache.get(JOGA_KEY).text, /Three v2/);
+});
+
+test("publishing shares any synced lyrics the app has, from any source", async () => {
+  const posted = [];
+  const { host } = await setup(lyricsRoute(posted), {
+    session: { token: "vcom_tok", user: { login: "alice" } },
+    current: { title: "Jóga", artist_name: "Björk", duration_secs: 305 },
+  });
+  const publish = () => host.menu["publish-lyrics"]({ kind: "track", title: "Jóga", artistName: "Björk", albumTitle: "Homogenic" });
+
+  await publish();
+  assert.match(host.lastNotice().message, /no lyrics/);
+
+  host.webLyrics.set(JOGA_KEY, { text: "plain words", kind: "plain" });
+  await publish();
+  assert.match(host.lastNotice().message, /only has plain lyrics/);
+  assert.equal(posted.length, 0);
+
+  for (const value of [
+    { text: LRC, kind: "synced", _meta: { providerName: "LRCLIB" } },
+    { text: LRC, kind: "synced", local: true, _meta: { providerName: "Local file" } },
+    { text: LRC, kind: "synced" },
+  ]) {
+    host.lyricsCache.set(JOGA_KEY, value);
+    await publish();
+  }
+  assert.equal(posted.length, 3);
+  assert.deepEqual(posted[0], { kind: "synced_lyrics", title: "Jóga", artistName: "Björk", albumName: "Homogenic", lrc: LRC, durationSecs: 305 });
+});
+
+test("Find shared synced lyrics searches the tab for that song; a share link asks to import", async () => {
+  const { host } = await setup(lyricsRoute([]));
+  await host.menu["find-lyrics"]({ kind: "track", title: "Jóga", artistName: "Björk" });
+  const search = host.requests.filter((r) => r.url.includes("/v1/items/search")).at(-1);
+  assert.equal(new URL(search.url).searchParams.get("q"), "Björk Jóga");
+  assert.equal(nodes(host.lastView(), "tabs")[0].activeTab, "synced_lyrics");
+
+  await host.deepLink("viboplr://plugin/community/open?id=ly1");
+  for (let i = 0; i < 10; i++) await flush();
+  const confirm = nodes(host.lastView(), "confirm")[0];
+  assert.equal(confirm.confirmAction, "confirm-import-lyrics");
+  assert.match(confirm.message, /@bob's synced lyrics for “Jóga” by Björk/);
 });

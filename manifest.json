@@ -1,9 +1,9 @@
 {
   "id": "community",
   "name": "Viboplr Community",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "author": "Viboplr",
-  "description": "Share your Now Playing cue sheets and your playlists (as mixtapes) on Viboplr Community, and play or import what other people made. Add the Subsonic / Navidrome servers their owners opened to everyone. Sign in with GitHub to publish; browsing, playing, importing and adding need no account.",
+  "description": "Share your Now Playing cue sheets, your synced lyrics and your playlists (as mixtapes) on Viboplr Community, and play or import what other people made. Add the Subsonic / Navidrome servers their owners opened to everyone. Sign in with GitHub to publish; browsing, playing, importing and adding need no account.",
   "minAppVersion": "1.0.93",
   "stability": "experimental",
   "homepage": "https://github.com/outcast1000/viboplr-community-plugin",
@@ -18,7 +18,9 @@
     "playback:read",
     "playback:control",
     "library:read",
-    "library:write"
+    "library:write",
+    "lyrics:write",
+    "plugins:call"
   ],
   "apiUsage": [
     { "api": "network.fetch", "reason": "Browse, import and publish on community.viboplr.com" },
@@ -32,9 +34,11 @@
     { "api": "playlists.getTracks", "reason": "Read the track list of a playlist you publish (titles and artists only, never file paths)" },
     { "api": "playlists.save", "reason": "Save a mixtape you chose to your Playlists" },
     { "api": "playlists.delete", "reason": "Replace a saved mixtape with its newer version, when you update it" },
+    { "api": "lyrics.save", "reason": "Make synced lyrics you chose to import the song's lyrics" },
+    { "api": "informationTypes.fetch", "reason": "Read a song's synced lyrics when you publish them, and look the song up again when you undo an import" },
     { "api": "collections.requestAdd", "reason": "Open the app's Add Server dialog for a listed server — you confirm there" }
   ],
-  "viewHeader": { "subtitle": "Cue sheets, mixtapes and servers shared by Viboplr users" },
+  "viewHeader": { "subtitle": "Cue sheets, synced lyrics, mixtapes and servers shared by Viboplr users" },
   "contributes": {
     "sidebarItems": [
       { "id": "community", "label": "Community", "icon": "M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7M16 6l-4-4-4 4M12 2v13" }
@@ -42,6 +46,8 @@
     "contextMenuItems": [
       { "id": "find-cues", "label": "Find shared cue sheets", "targets": ["track"] },
       { "id": "publish-cues", "label": "Publish cue sheet…", "targets": ["track"] },
+      { "id": "find-lyrics", "label": "Find shared synced lyrics", "targets": ["track"] },
+      { "id": "publish-lyrics", "label": "Publish synced lyrics…", "targets": ["track"] },
       { "id": "publish-mixtape", "label": "Publish as a mixtape…", "targets": ["playlist"] }
     ]
   }

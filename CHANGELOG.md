@@ -1,3 +1,12 @@
+## 0.3.0
+
+- **Synced lyrics:** a new tab for time-synced lyrics people shared. Search it whenever you like and **Import** what you want: the lyrics become the song's lyrics, as if you'd edited them in yourself, and scroll along in Now Playing straight away. Nothing is looked up while you listen — only when you search or import.
+- If the song already has synced lyrics, Viboplr asks before replacing them, and says where yours came from. **Undo import** (**Mine → Synced lyrics**) gives the song back to your lyrics providers.
+- **Publish synced lyrics:** right-click a track → **Publish synced lyrics…** shares whatever synced lyrics Viboplr has for it, wherever they came from. Plain lyrics can't be shared.
+- Right-click a track → **Find shared synced lyrics** searches the tab for that song. Share links open it, ready to import.
+- Importing needs Viboplr 1.0.94 or later; searching and publishing work on 1.0.93.
+- New permissions, asked for once on update: `lyrics:write`, to put lyrics you import in place, and `plugins:call`, to read a song's lyrics through Viboplr's lyrics providers.
+
 ## 0.2.1
 
 - **Mine** never lists Viboplr's own playlists — Liked Tracks, Disliked Tracks and the mixes it makes for you — on any version of Viboplr, not only 1.0.94+. That includes one you published earlier; unpublish it from its page on the website.
