@@ -3,7 +3,7 @@
   "name": "Viboplr Community",
   "version": "0.3.0",
   "author": "Viboplr",
-  "description": "Share your Now Playing cue sheets, your synced lyrics and your playlists (as mixtapes) on Viboplr Community, and play or import what other people made. Add the Subsonic / Navidrome servers their owners opened to everyone. Sign in with GitHub to publish; browsing, playing, importing and adding need no account.",
+  "description": "Share your Now Playing cue sheets, your synced lyrics and your playlists (as mixtapes) on Viboplr Community, and play or import what other people made. Signed-in members can also add the Subsonic / Navidrome servers their owners opened to the community. Sign in with GitHub to publish or to see shared servers; browsing, playing and importing everything else needs no account.",
   "minAppVersion": "1.0.93",
   "stability": "experimental",
   "homepage": "https://github.com/outcast1000/viboplr-community-plugin",
@@ -38,7 +38,7 @@
     { "api": "informationTypes.fetch", "reason": "Read a song's synced lyrics when you publish them, and look the song up again when you undo an import" },
     { "api": "collections.requestAdd", "reason": "Open the app's Add Server dialog for a listed server — you confirm there" }
   ],
-  "viewHeader": { "subtitle": "Cue sheets, synced lyrics, mixtapes and servers shared by Viboplr users" },
+  "viewHeader": { "subtitle": "Cue sheets, synced lyrics, mixtapes and Subsonic servers shared by Viboplr users" },
   "contributes": {
     "sidebarItems": [
       { "id": "community", "label": "Community", "icon": "M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7M16 6l-4-4-4 4M12 2v13" }

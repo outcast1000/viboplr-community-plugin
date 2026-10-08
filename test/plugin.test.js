@@ -273,15 +273,21 @@ const SERVER_ITEM = {
   },
 };
 
-test("the Servers tab lists servers and Add opens the app's own dialog with the login", async () => {
+test("the Subsonic servers tab lists servers and Add opens the app's own dialog with the login", async () => {
   const counted = [];
-  const { host } = await setup((u) => {
-    if (u.pathname === "/v1/items/search" && u.searchParams.get("kind") === "subsonic_server") {
-      return { body: { items: [SERVER_ITEM], hasMore: false } };
-    }
-    if (u.pathname === "/v1/items/srv1/imported") counted.push(1);
-    return { status: 204 };
-  });
+  const { host } = await setup(
+    (u, init) => {
+      if (u.pathname === "/v1/items/search" && u.searchParams.get("kind") === "subsonic_server") {
+        // Members only: the server answers a signed-in caller alone.
+        if (init.headers.Authorization !== "Bearer vcom_tok") return { status: 401, body: { error: "sign in to see Subsonic servers" } };
+        return { body: { items: [SERVER_ITEM], hasMore: false } };
+      }
+      if (u.pathname === "/v1/items/srv1/imported") counted.push(1);
+      if (u.pathname === "/v1/me/items") return { body: { items: [] } };
+      return { status: 204 };
+    },
+    { session: { token: "vcom_tok", user: { login: "bob" } } }
+  );
   await host.actions.tab({ tabId: "subsonic_server" });
   const list = nodes(host.lastView(), "track-row-list")[0];
   assert.equal(list.items[0].title, "Jazz box");
@@ -294,6 +300,33 @@ test("the Servers tab lists servers and Add opens the app's own dialog with the 
     { kind: "subsonic", name: "Jazz box", url: "https://music.example.com", username: "guest", password: "g&t" },
   ]);
   assert.equal(counted.length, 1);
+});
+
+test("signed out, the Subsonic servers tab asks you to sign in and fetches nothing", async () => {
+  const { host } = await setup(() => ({ status: 204 }));
+  host.requests.length = 0;
+  await host.actions.tab({ tabId: "subsonic_server" });
+  assert.equal(host.requests.filter((q) => q.url.includes("/v1/items/search")).length, 0, "no request the server would refuse");
+  const view = host.lastView();
+  assert.ok(nodes(view, "text").some((n) => n.content === "Subsonic servers are for signed-in members. Sign in with GitHub to see them."));
+  assert.ok(nodes(view, "button").some((b) => b.action === "sign-in"));
+  assert.equal(nodes(view, "track-row-list").length, 0);
+});
+
+test("signing out takes the Subsonic servers listing off the screen", async () => {
+  const { host } = await setup(
+    (u) => {
+      if (u.pathname === "/v1/items/search") return { body: { items: [SERVER_ITEM], hasMore: false } };
+      if (u.pathname === "/v1/me/items") return { body: { items: [] } };
+      return { status: 204 };
+    },
+    { session: { token: "vcom_tok", user: { login: "bob" } } }
+  );
+  await host.actions.tab({ tabId: "subsonic_server" });
+  assert.equal(nodes(host.lastView(), "track-row-list")[0].items[0].title, "Jazz box");
+  await host.actions["sign-out"]();
+  assert.equal(nodes(host.lastView(), "track-row-list").length, 0);
+  assert.ok(nodes(host.lastView(), "button").some((b) => b.action === "sign-in"));
 });
 
 test("on an app without requestAdd, Add opens the server's page instead", async () => {
@@ -320,7 +353,7 @@ test("tabs are one per module plus Mine, which has a section per module", async 
   await host.actions.tab({ tabId: "mine" });
   const sections = nodes(host.lastView(), "section");
   // Cue sheets and mixtapes bring their own sections (what's on this computer); servers use the generic one.
-  assert.deepEqual(sections.map((n) => n.title), ["Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your servers"]);
+  assert.deepEqual(sections.map((n) => n.title), ["Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your Subsonic servers"]);
   const [sheets, , , servers] = sections.map((n) => nodes({ children: n.children }, "track-row-list")[0]);
   assert.equal(sheets.items[0].badge.label, "Published", "matched against your cue sheets online");
   assert.equal(servers.items[0].title, "Jazz box");
@@ -365,7 +398,7 @@ test("a module the plugin has never heard of still gets a working tab and Mine s
     { session: { token: "vcom_tok", user: { login: "bob" } } }
   );
   await plugin._loadModules();
-  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.label), ["Cue sheets", "Synced lyrics", "Mixtapes", "Servers", "EQ presets", "Mine"]);
+  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.label), ["Cue sheets", "Synced lyrics", "Mixtapes", "Subsonic servers", "EQ presets", "Mine"]);
   assert.ok(host.storage.get("modules").some((m) => m.kind === "eq_preset"), "remembered for the next start");
 
   await host.actions.tab({ tabId: "eq_preset" });
@@ -379,7 +412,7 @@ test("a module the plugin has never heard of still gets a working tab and Mine s
 
   await host.actions.tab({ tabId: "mine" });
   const titles = nodes(host.lastView(), "section").map((n) => n.title);
-  assert.deepEqual(titles, ["Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your servers", "Your eq presets"]);
+  assert.deepEqual(titles, ["Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your Subsonic servers", "Your eq presets"]); // eq: no `plural`, so the lowercased name
 });
 
 // The built-in module descriptions as the server would send them.

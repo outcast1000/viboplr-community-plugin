@@ -173,6 +173,7 @@ var BUILTIN_MODULES = [
     slug: "cue-sheets",
     name: "Cue sheets",
     singular: "cue sheet",
+    plural: "cue sheets",
     notice: "",
     popularLabel: "Most imported",
     useNoun: ["import", "imports"],
@@ -184,6 +185,7 @@ var BUILTIN_MODULES = [
     slug: "lyrics",
     name: "Synced lyrics",
     singular: "lyric sheet",
+    plural: "synced lyrics",
     notice: "",
     popularLabel: "Most imported",
     useNoun: ["import", "imports"],
@@ -195,6 +197,7 @@ var BUILTIN_MODULES = [
     slug: "mixtapes",
     name: "Mixtapes",
     singular: "mixtape",
+    plural: "mixtapes",
     notice: "A mixtape is a track list, not music: songs you can't get anywhere are skipped.",
     popularLabel: "Most played",
     useNoun: ["play", "plays"],
@@ -204,15 +207,37 @@ var BUILTIN_MODULES = [
   {
     kind: "subsonic_server",
     slug: "servers",
-    name: "Servers",
-    singular: "server",
+    name: "Subsonic servers",
+    singular: "Subsonic server",
+    plural: "Subsonic servers",
     notice: "Listings carry their owner's shared login in plain text. Treat them as public.",
     popularLabel: "Most added",
     useNoun: ["add", "adds"],
     url: SERVER + "/servers",
     shareUrl: SERVER + "/servers/new",
+    membersOnly: true,
   },
 ];
+
+// A module's plural inside a sentence. Servers that predate `plural` only send
+// `name`; lowercasing it is the fallback, not the rule, since it would turn
+// "Subsonic servers" into "subsonic servers".
+function pluralOf(m) {
+  return typeof m.plural === "string" && m.plural ? m.plural : m.name.toLowerCase();
+}
+
+// A members-only module (the server says which) shows nothing until the user
+// signs in: its reads answer 401 to anyone else.
+function membersLocked(m) {
+  return !!(m && m.membersOnly) && !state.token;
+}
+
+// Signing out takes members-only listings off the screen with the session.
+function forgetMembersOnly() {
+  state.modules.forEach(function (m) {
+    if (m.membersOnly) delete state.browse[m.kind];
+  });
+}
 
 // Only modules whose description is usable; anything else is ignored rather
 // than breaking the view.
@@ -525,6 +550,7 @@ function sessionLost() {
   state.token = null;
   state.user = null;
   clearShared();
+  forgetMembersOnly();
   saveSession().catch(function (e) {
     api.log("error", "Couldn't clear the stored session: " + errorText(e));
   });
@@ -583,7 +609,9 @@ function finishSignIn(params) {
     .then(function () {
       notify("Signed in to Viboplr Community as @" + state.user.login + ".");
       render();
-      return loadShared();
+      // The open tab may be one only members can see; load it now.
+      var m = currentModule();
+      return Promise.all([loadShared(), m && m.membersOnly ? loadTab() : null]);
     })
     .catch(function (e) {
       render();
@@ -603,6 +631,7 @@ function signOut() {
       state.token = null;
       state.user = null;
       clearShared();
+      forgetMembersOnly();
       return saveSession();
     })
     .then(function () {
@@ -647,10 +676,13 @@ function loadModules() {
 }
 
 function loadList(kind, page) {
+  var m = moduleFor(kind);
+  if (membersLocked(m)) return Promise.resolve(render());
   var b = browseState(kind);
   page = page || 0;
   return withLoading(function () {
-    return request("GET", "/v1/items/search?" + queryString({ kind: kind, q: b.query, sort: b.sort, page: page })).then(function (data) {
+    var path = "/v1/items/search?" + queryString({ kind: kind, q: b.query, sort: b.sort, page: page });
+    return request("GET", path, undefined, !!(m && m.membersOnly)).then(function (data) {
       b.items = page > 0 && b.items ? b.items.concat(data.items) : data.items;
       b.page = page;
       b.more = !!data.hasMore;
@@ -942,7 +974,7 @@ function mySheetNodes() {
 function openShared(id) {
   if (!id) return Promise.resolve();
   api.ui.navigateToView(VIEW);
-  return request("GET", "/v1/items/" + encodeURIComponent(id))
+  return request("GET", "/v1/items/" + encodeURIComponent(id), undefined, !!state.token)
     .then(function (data) {
       var item = data.item;
       if (item.kind === "mixtape") {
@@ -959,6 +991,7 @@ function openShared(id) {
     })
     .catch(function (e) {
       if (e && e.status === 404) notify("That isn't in the community any more.");
+      else if (e && e.status === 401) notify("That link is for signed-in members. Sign in to Viboplr Community, then open it again.");
       else fail("Couldn't open that link", e);
     });
 }
@@ -1529,7 +1562,7 @@ function addServer(id) {
   var known = knownItem(id);
   var item = known
     ? Promise.resolve(known)
-    : request("GET", "/v1/items/" + encodeURIComponent(id)).then(function (d) {
+    : request("GET", "/v1/items/" + encodeURIComponent(id), undefined, !!state.token).then(function (d) {
         return d.item;
       });
   return item
@@ -1542,6 +1575,7 @@ function addServer(id) {
     })
     .catch(function (e) {
       if (e && e.status === 404) notify("That server isn't listed any more.");
+      else if (e && e.status === 401) notify("Sign in to Viboplr Community to add a shared Subsonic server.");
       else fail("Couldn't add that server", e);
     });
 }
@@ -1598,13 +1632,20 @@ function shareButton(m) {
 
 // One module's tab: notice, its controls, then its list (or the integration's own body).
 function moduleNodes(m) {
+  if (membersLocked(m)) {
+    return [
+      banner(m.name + " are for signed-in members. Sign in with GitHub to see them.", "muted", [
+        { type: "button", label: "Sign in", action: "sign-in", variant: "accent" },
+      ]),
+    ].concat(noticeNodes(m));
+  }
   var integration = INTEGRATIONS[m.kind] || {};
   var nodes = [];
   var controls = integration.controls ? integration.controls() : [];
   var body = integration.body ? integration.body() : null;
   if (body) return nodes.concat(controls, body, noticeNodes(m));
   var b = browseState(m.kind);
-  nodes.push({ type: "search-input", placeholder: "Search " + m.name.toLowerCase(), action: "search", value: b.query, submitOnly: true, buttonLabel: "Search" });
+  nodes.push({ type: "search-input", placeholder: "Search " + pluralOf(m), action: "search", value: b.query, submitOnly: true, buttonLabel: "Search" });
   var row = controls.concat([
     {
       type: "select",
@@ -1621,7 +1662,7 @@ function moduleNodes(m) {
   if (share) row.push(share);
   nodes.push({ type: "layout", direction: "horizontal", children: row });
   nodes = nodes.concat(noticeNodes(m));
-  if (state.loading && !b.items) nodes.push({ type: "loading", message: "Loading " + m.name.toLowerCase() + "…" });
+  if (state.loading && !b.items) nodes.push({ type: "loading", message: "Loading " + pluralOf(m) + "…" });
   else if (b.items && b.items.length === 0) {
     nodes.push({ type: "text", content: b.query ? "Nothing matches that search." : "Nothing shared yet." });
   } else if (b.items) {
@@ -1650,7 +1691,7 @@ function mineNodes() {
     if (integration && integration.mine) {
       nodes.push({ type: "section", title: integration.mine.title, children: integration.mine.nodes() });
     } else {
-      nodes.push({ type: "section", title: "Your " + m.name.toLowerCase(), children: sharedNodes(m) });
+      nodes.push({ type: "section", title: "Your " + pluralOf(m), children: sharedNodes(m) });
     }
   });
   return nodes;
@@ -1660,9 +1701,9 @@ function mineNodes() {
 function sharedNodes(m) {
   var share = shareButton(m);
   var tail = share ? [share] : [];
-  if (!state.token) return [{ type: "text", content: "Sign in to see the " + m.name.toLowerCase() + " you shared." }].concat(tail);
+  if (!state.token) return [{ type: "text", content: "Sign in to see the " + pluralOf(m) + " you shared." }].concat(tail);
   var mine = state.shared[m.kind] || [];
-  if (!mine.length) return [{ type: "text", content: "You haven't shared any " + m.name.toLowerCase() + "." }].concat(tail);
+  if (!mine.length) return [{ type: "text", content: "You haven't shared any " + pluralOf(m) + "." }].concat(tail);
   var actions = [{ id: "page", label: "Open page" }];
   if (m.shareUrl) actions.push({ id: "edit", label: "Edit" });
   return [

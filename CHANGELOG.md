@@ -1,3 +1,8 @@
+## Unreleased
+
+- The **Servers** tab is now **Subsonic servers**, so it says what kind of server it lists.
+- **Subsonic servers are for signed-in members only.** Signed out, the tab asks you to sign in with GitHub; signing out takes the listing off the screen. Cue sheets, synced lyrics and mixtapes still need no account.
+
 ## 0.3.0
 
 - **Synced lyrics:** a new tab for time-synced lyrics people shared. Search it whenever you like and **Import** what you want: the lyrics become the song's lyrics, as if you'd edited them in yourself, and scroll along in Now Playing straight away. Nothing is looked up while you listen — only when you search or import.
