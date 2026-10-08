@@ -13,9 +13,14 @@
 //    through the host's api.cues (the app's own normalizer), servers through
 //    api.collections.requestAdd (the app's own Add Server dialog, which the
 //    user confirms).
-//  - PKCE OVER A DEEP LINK. The server hands a one-time code back through
-//    viboplr://plugin/community/auth (scoped, so only this plugin sees it). The
-//    code is useless without the verifier, which never leaves this worker.
+//  - TWO WAYS TO SIGN IN. The usual one is PKCE over a deep link: the server
+//    hands a one-time code back through viboplr://plugin/community/auth
+//    (scoped, so only this plugin sees it), useless without the verifier,
+//    which never leaves this worker. The other is a device code (RFC 8628):
+//    the person confirms a short code on the website in any browser and this
+//    worker polls until they have. Nothing comes back from the browser, so it
+//    works where the deep link can't arrive — a browser a company proxy runs
+//    in isolation, or a system where viboplr:// isn't registered.
 //  - PROVENANCE LIVES HERE. A sheet file has no "came from the community"
 //    field, so the mapping song → community item (+ the local updatedAt at
 //    import) is kept in this plugin's storage. That is what lets Mine tell an
@@ -40,6 +45,9 @@ var SERVER = "https://community.viboplr.com";
 var VIEW = "community";
 var TIMEOUT_MS = 15000;
 var AUTH_TTL_MS = 10 * 60 * 1000;
+// Device sign-in, when the server doesn't say: RFC 8628's defaults.
+var DEVICE_POLL_DEFAULT_SECS = 5;
+var DEVICE_TTL_DEFAULT_SECS = 600;
 var LINK_PREFIX = "viboplr://plugin/community/";
 var USER_AGENT = "Viboplr-Community-Plugin/0.2(+https://github.com/outcast1000/viboplr-community-plugin)";
 var MAX_AUTHOR_CHARS = 64;
@@ -54,7 +62,9 @@ function freshState() {
   return {
     token: null,
     user: null,
-    // In-flight browser sign-in: { state, verifier, at }.
+    // In-flight sign-in. Through the browser's deep link:
+    // { mode: "link", state, verifier, at }. With a device code:
+    // { mode: "device", deviceCode, userCode, url, intervalMs, expiresAt, timer }.
     auth: null,
     // What can be shared (GET /v1/modules); BUILTIN_MODULES until it answers.
     modules: BUILTIN_MODULES.slice(),
@@ -485,9 +495,12 @@ function fail(what, e) {
   notify(what + ": " + errorText(e));
 }
 
-function requestError(message, status) {
+// `code` is the server's machine-readable `error`, where it has one (the
+// device sign-in answers: authorization_pending, slow_down, expired_token).
+function requestError(message, status, code) {
   var e = new Error(message);
   e.status = status;
+  e.code = code || null;
   return e;
 }
 
@@ -517,7 +530,9 @@ function request(method, path, body, auth) {
         sessionLost();
         throw requestError("Your Viboplr Community sign-in has ended. Sign in again.", 401);
       }
-      if (resp.status >= 400) throw requestError((data && data.error) || "Viboplr Community answered HTTP " + resp.status, resp.status);
+      if (resp.status >= 400) {
+        throw requestError((data && data.error) || "Viboplr Community answered HTTP " + resp.status, resp.status, data && data.error);
+      }
       // A 3xx here is a redirect the host refused to follow (it leads off
       // community.viboplr.com — a captive portal or a filtering proxy), and a
       // 2xx without JSON is nobody we know. Either way, say what came back.
@@ -561,23 +576,25 @@ function sessionLost() {
 // Sign-in
 // ---------------------------------------------------------------------------
 
+// The usual sign-in: the browser hands a one-time code back over the deep link.
 function signIn() {
-  if (state.auth && Date.now() - state.auth.at < AUTH_TTL_MS) {
+  if (state.auth && state.auth.mode === "link" && Date.now() - state.auth.at < AUTH_TTL_MS) {
     notify("Finish signing in in your browser, or cancel and start again.");
     return Promise.resolve();
   }
+  stopSignIn();
   var verifier = base64url(randomBytes(32));
   var nonce = base64url(randomBytes(16));
   return pkceChallenge(verifier)
     .then(function (challenge) {
-      state.auth = { state: nonce, verifier: verifier, at: Date.now() };
+      state.auth = { mode: "link", state: nonce, verifier: verifier, at: Date.now() };
       render();
       return api.network.openUrl(
         SERVER + "/auth/github/start?" + queryString({ client: "app", state: nonce, code_challenge: challenge, code_challenge_method: "S256" })
       );
     })
     .catch(function (e) {
-      state.auth = null;
+      stopSignIn();
       render();
       fail("Couldn't start signing in", e);
     });
@@ -585,7 +602,7 @@ function signIn() {
 
 function finishSignIn(params) {
   var pending = state.auth;
-  if (!pending || params.state !== pending.state) {
+  if (!pending || pending.mode !== "link" || params.state !== pending.state) {
     api.log("warn", "Ignored a sign-in link that doesn't match a sign-in started here");
     return Promise.resolve();
   }
@@ -600,12 +617,115 @@ function finishSignIn(params) {
     notify("That sign-in took too long. Start again.");
     return Promise.resolve();
   }
-  return request("POST", "/auth/exchange", { code: params.code, verifier: pending.verifier, label: "Viboplr app" })
-    .then(function (data) {
-      state.token = data.token;
-      state.user = data.user;
-      return saveSession();
+  return request("POST", "/auth/exchange", { code: params.code, verifier: pending.verifier, label: "Viboplr app" }).then(completeSignIn, function (e) {
+    render();
+    fail("Couldn't finish signing in", e);
+  });
+}
+
+// The other sign-in, for when the deep link can't reach the app: a short code
+// confirmed on the website, in any browser on any device.
+function signInWithCode() {
+  // Already waiting on a code: show the page again (its tab may be closed).
+  if (state.auth && state.auth.mode === "device") return openSignInPage();
+  // Waiting on the browser's link instead: that one is given up.
+  stopSignIn();
+  return request("POST", "/auth/device", { label: "Viboplr app" })
+    .then(function (d) {
+      if (!d || !d.deviceCode || !d.userCode) throw new Error("the server's answer had no sign-in code");
+      var interval = Number(d.interval);
+      var ttl = Number(d.expiresIn);
+      state.auth = {
+        mode: "device",
+        deviceCode: d.deviceCode,
+        userCode: d.userCode,
+        url: d.verificationUriComplete || d.verificationUri || SERVER + "/device",
+        intervalMs: (isFinite(interval) && interval >= 0 ? interval : DEVICE_POLL_DEFAULT_SECS) * 1000,
+        expiresAt: Date.now() + (ttl > 0 ? ttl : DEVICE_TTL_DEFAULT_SECS) * 1000,
+        timer: null,
+      };
+      render();
+      schedulePoll(state.auth);
+      return openSignInPage();
     })
+    .catch(function (e) {
+      stopSignIn();
+      render();
+      fail("Couldn't start signing in", e);
+    });
+}
+
+// The code is in the view too, so a browser that won't open isn't the end:
+// the person can type it at community.viboplr.com/device on any device.
+function openSignInPage() {
+  if (!state.auth || state.auth.mode !== "device") return Promise.resolve();
+  return Promise.resolve(api.network.openUrl(state.auth.url)).catch(function (e) {
+    fail("Couldn't open your browser", e);
+  });
+}
+
+function stopSignIn() {
+  if (state.auth && state.auth.timer) clearTimeout(state.auth.timer);
+  state.auth = null;
+}
+
+function schedulePoll(pending) {
+  pending.timer = setTimeout(function () {
+    pending.timer = null;
+    pollSignIn(pending);
+  }, pending.intervalMs);
+}
+
+function expireSignIn() {
+  stopSignIn();
+  render();
+  notify("The sign-in code expired. Sign in again for a new one.");
+}
+
+// One "has it been confirmed?" Every answer but a token means wait or stop;
+// a sign-in cancelled (or restarted) meanwhile drops whatever comes back.
+function pollSignIn(pending) {
+  if (!api || state.auth !== pending) return Promise.resolve();
+  if (Date.now() > pending.expiresAt) {
+    expireSignIn();
+    return Promise.resolve();
+  }
+  return request("POST", "/auth/device/token", { deviceCode: pending.deviceCode }).then(
+    function (data) {
+      if (!api || state.auth !== pending) return;
+      state.auth = null;
+      return completeSignIn(data);
+    },
+    function (e) {
+      if (!api || state.auth !== pending) return;
+      if (e.code === "authorization_pending") return schedulePoll(pending);
+      if (e.code === "slow_down") {
+        pending.intervalMs += DEVICE_POLL_DEFAULT_SECS * 1000;
+        return schedulePoll(pending);
+      }
+      if (e.code === "expired_token") return expireSignIn();
+      // Offline for a moment, or the server restarting: keep asking until the
+      // code expires. Anything else (a proxy's page, a refusal) won't improve.
+      if (!e.status || e.status >= 500) {
+        api.log("warn", "Couldn't check the sign-in, trying again: " + errorText(e));
+        return schedulePoll(pending);
+      }
+      stopSignIn();
+      render();
+      fail("Couldn't finish signing in", e);
+    }
+  );
+}
+
+function completeSignIn(data) {
+  if (!data || !data.token || !data.user) {
+    render();
+    fail("Couldn't finish signing in", new Error("the server's answer had no session"));
+    return Promise.resolve();
+  }
+  state.token = data.token;
+  state.user = data.user;
+  return saveSession()
     .then(function () {
       notify("Signed in to Viboplr Community as @" + state.user.login + ".");
       render();
@@ -1587,18 +1707,21 @@ function addServer(id) {
 function setHeader() {
   if (typeof api.ui.setViewHeader !== "function") return;
   var status;
-  var first;
+  var account;
   if (state.auth) {
     status = { variant: "warning", label: "Signing in…" };
-    first = { label: "Cancel sign-in", action: "cancel-sign-in", variant: "secondary" };
+    account = [{ label: "Cancel sign-in", action: "cancel-sign-in", variant: "secondary" }];
   } else if (state.user) {
     status = { variant: "success", label: "@" + state.user.login };
-    first = { label: "Sign out", action: "sign-out", variant: "secondary" };
+    account = [{ label: "Sign out", action: "sign-out", variant: "secondary" }];
   } else {
     status = { variant: "muted", label: "Signed out" };
-    first = { label: "Sign in with GitHub", action: "sign-in", variant: "accent" };
+    account = [
+      { label: "Sign in with GitHub", action: "sign-in", variant: "accent" },
+      { label: "Sign in with a code", action: "sign-in-code", variant: "secondary" },
+    ];
   }
-  api.ui.setViewHeader(VIEW, { status: status, actions: [first, { label: "Open website", action: "open-site", variant: "secondary" }] });
+  api.ui.setViewHeader(VIEW, { status: status, actions: account.concat([{ label: "Open website", action: "open-site", variant: "secondary" }]) });
 }
 
 function banner(text, variant, buttons) {
@@ -1802,10 +1925,24 @@ function render() {
     },
   ];
   if (state.confirm) children.push(confirmNode());
-  if (state.auth) {
-    children.push(banner("Finish signing in in your browser. Viboplr will pick it up when you're done.", "muted", [
-      { type: "button", label: "Cancel", action: "cancel-sign-in", variant: "secondary" },
-    ]));
+  if (state.auth && state.auth.mode === "link") {
+    children.push(
+      banner("Finish signing in in your browser. Viboplr will pick it up when you're done. If it doesn't, sign in with a code instead.", "muted", [
+        { type: "button", label: "Use a code instead", action: "sign-in-code", variant: "secondary" },
+        { type: "button", label: "Cancel", action: "cancel-sign-in", variant: "secondary" },
+      ])
+    );
+  } else if (state.auth) {
+    children.push(
+      banner(
+        "To sign in, confirm the code " + state.auth.userCode + " in your browser, or enter it at " + SERVER.replace(/^https?:\/\//, "") + "/device on any device. Viboplr signs you in as soon as you do.",
+        "muted",
+        [
+          { type: "button", label: "Open page", action: "open-sign-in-page", variant: "accent" },
+          { type: "button", label: "Cancel", action: "cancel-sign-in", variant: "secondary" },
+        ]
+      )
+    );
   }
   if (state.error) {
     children.push(banner("Couldn't reach Viboplr Community: " + state.error, "warning", [{ type: "button", label: "Try again", action: "retry", variant: "accent" }]));
@@ -1972,8 +2109,14 @@ var ACTIONS = {
   "sign-in": function () {
     return signIn();
   },
+  "sign-in-code": function () {
+    return signInWithCode();
+  },
+  "open-sign-in-page": function () {
+    return openSignInPage();
+  },
   "cancel-sign-in": function () {
-    state.auth = null;
+    stopSignIn();
     render();
   },
   "sign-out": function () {
@@ -2069,6 +2212,7 @@ function activate(pluginApi) {
 function deactivate() {
   if (firstLoadTimer) clearTimeout(firstLoadTimer);
   firstLoadTimer = null;
+  if (state) stopSignIn();
   api = null;
 }
 

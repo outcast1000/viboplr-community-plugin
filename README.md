@@ -16,7 +16,8 @@ This plugin is the Viboplr client for [Viboplr Community](https://community.vibo
 **Adding a module:** declare it on the server (`src/modules.rs` in `viboplr-community`). It then appears here, and on viboplr.com's Community page, without a release. Add an `INTEGRATIONS` entry only when the module should do something in the app beyond opening its page.
 
 Sign-in and links:
-- **Sign in with GitHub** opens your browser. The server hands a one-time code back through `viboplr://plugin/community/auth`, and the plugin trades it for a revocable token using PKCE.
+- **Sign in with GitHub** (the usual way) opens your browser. The server hands a one-time code back through `viboplr://plugin/community/auth`, and the plugin trades it for a revocable token using PKCE.
+- **Sign in with a code** (the header's second button, or **Use a code instead** while a browser sign-in is waiting) uses a device code (RFC 8628). The plugin gets a short code from `POST /auth/device`, shows it, and opens `community.viboplr.com/device?code=…`. You sign in there and confirm the code, in that browser or on any other device. Meanwhile the plugin polls `POST /auth/device/token` and receives the same kind of token once you confirm. Nothing has to come back from the browser, so this works behind company proxies that isolate the browser, where the `viboplr://` link can't reach the app. Starting one sign-in gives up the other, so a late link from an abandoned browser sign-in is ignored.
   - The verifier never leaves the plugin.
   - The GitHub token never reaches the app.
 - **Share links** of the form `viboplr://plugin/community/open?id=…` (the *Open in Viboplr* button on a cue sheet or mixtape page) open the item: a cue sheet ready to import, a mixtape ready to save.

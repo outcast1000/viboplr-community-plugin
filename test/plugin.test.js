@@ -55,11 +55,14 @@ test("base64url matches RFC 4648 and parseLink reads scoped links only", () => {
   assert.equal(p._parseLink("viboplr://plugin/other/auth?code=x"), null);
 });
 
-test("an imported sheet's byline keeps its author and names who shared it", () => {
-  const p = loadPlugin();
-  assert.equal(p._importAuthor(ITEM), "Claude · via @alice");
-  assert.equal(p._importAuthor({ ...ITEM, author: null }), "@alice");
-  assert.ok(p._importAuthor({ ...ITEM, author: "x".repeat(100) }).length <= 64);
+test("signed out, the header offers the browser sign-in first and a code second", async () => {
+  const { host } = await setup(() => undefined);
+  const actions = host.lastHeader().actions;
+  assert.deepEqual(
+    actions.map((a) => [a.action, a.variant]),
+    [["sign-in", "accent"], ["sign-in-code", "secondary"], ["open-site", "secondary"]]
+  );
+  assert.equal(actions[1].label, "Sign in with a code");
 });
 
 test("sign-in: PKCE challenge in the browser link, verifier only in the exchange", async () => {
@@ -79,6 +82,8 @@ test("sign-in: PKCE challenge in the browser link, verifier only in the exchange
   assert.equal(start.searchParams.get("code_challenge_method"), "S256");
   const st = start.searchParams.get("state");
   assert.equal(host.lastHeader().status.label, "Signing in…");
+  // While it waits, the code sign-in is one click away.
+  assert.ok(nodes(host.lastView(), "button").some((b) => b.action === "sign-in-code" && b.label === "Use a code instead"));
 
   // A link with someone else's state is ignored.
   await host.deepLink("viboplr://plugin/community/auth?code=evil&state=wrong");
@@ -103,6 +108,142 @@ test("a cancelled sign-in clears the waiting state", async () => {
   await host.deepLink(`viboplr://plugin/community/auth?error=cancelled&state=${st}`);
   assert.equal(host.lastHeader().status.label, "Signed out");
   assert.match(host.lastNotice().message, /cancelled/);
+});
+
+const DEVICE = {
+  deviceCode: "device-secret",
+  userCode: "BCDF-GHJK",
+  verificationUri: "https://community.viboplr.com/device",
+  verificationUriComplete: "https://community.viboplr.com/device?code=BCDF-GHJK",
+  expiresIn: 600,
+  // Poll at once, so the test doesn't wait out the real five seconds.
+  interval: 0,
+};
+
+// Wait for the plugin's timers and requests to settle into `cond`.
+async function until(cond) {
+  for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 1));
+  return cond();
+}
+
+// A server whose device sign-in answers `answers` in turn, then the last forever.
+function deviceRoute(answers, polls, extra) {
+  return (u, init) => {
+    if (u.pathname === "/auth/device") return { body: DEVICE };
+    if (u.pathname === "/auth/device/token") {
+      polls.push(JSON.parse(init.body));
+      return answers[Math.min(polls.length, answers.length) - 1];
+    }
+    if (u.pathname === "/v1/me/items") return { body: { items: [] } };
+    if (u.pathname === "/v1/items/search") return { body: { items: [], hasMore: false } };
+    return extra ? extra(u, init) : undefined;
+  };
+}
+const PENDING = { status: 400, body: { error: "authorization_pending" } };
+
+test("sign-in: the browser confirms a code, the plugin polls until it's a session", async () => {
+  const polls = [];
+  const token = { body: { token: "vcom_tok", user: { login: "alice" } } };
+  const { host } = await setup(deviceRoute([PENDING, PENDING, token], polls));
+  await host.actions["sign-in-code"]();
+  assert.deepEqual(host.opened, [DEVICE.verificationUriComplete]);
+  assert.equal(host.lastHeader().status.label, "Signing in…");
+  // The code is on screen too, for a browser that didn't open.
+  const banner = nodes(host.lastView(), "text").find((n) => n.content.includes("BCDF-GHJK"));
+  assert.match(banner.content, /community\.viboplr\.com\/device/);
+  assert.ok(nodes(host.lastView(), "button").some((b) => b.action === "open-sign-in-page"));
+
+  assert.ok(await until(() => host.storage.get("session")), "signed in");
+  assert.equal(polls.length, 3);
+  assert.ok(polls.every((p) => p.deviceCode === "device-secret"));
+  assert.ok(!host.opened.some((u) => u.includes("device-secret")), "the device code never goes to the browser");
+  assert.deepEqual(host.storage.get("session"), { token: "vcom_tok", user: { login: "alice" } });
+  assert.equal(host.lastHeader().status.label, "@alice");
+  assert.match(host.lastNotice().message, /Signed in .* as @alice/);
+  await until(() => false);
+  assert.equal(polls.length, 3, "no polling once signed in");
+});
+
+test("asking for a code again while waiting reopens the page instead of starting over", async () => {
+  const polls = [];
+  const { host } = await setup(deviceRoute([PENDING], polls));
+  await host.actions["sign-in-code"]();
+  await host.actions["sign-in-code"]();
+  assert.equal(host.requests.filter((r) => new URL(r.url).pathname === "/auth/device").length, 1);
+  assert.deepEqual(host.opened, [DEVICE.verificationUriComplete, DEVICE.verificationUriComplete]);
+  await host.actions["cancel-sign-in"]();
+});
+
+test("cancelling a sign-in stops asking", async () => {
+  const polls = [];
+  const { host } = await setup(deviceRoute([PENDING], polls));
+  await host.actions["sign-in-code"]();
+  assert.ok(await until(() => polls.length >= 2));
+  await host.actions["cancel-sign-in"]();
+  const asked = polls.length;
+  await until(() => false);
+  assert.ok(polls.length <= asked + 1, "at most the poll already in flight");
+  assert.equal(host.lastHeader().status.label, "Signed out");
+  assert.equal(host.storage.get("session"), undefined);
+});
+
+test("an expired code ends the sign-in and says so", async () => {
+  const polls = [];
+  const { host } = await setup(deviceRoute([PENDING, { status: 400, body: { error: "expired_token" } }], polls));
+  await host.actions["sign-in-code"]();
+  assert.ok(await until(() => host.lastHeader().status.label === "Signed out"));
+  assert.equal(polls.length, 2);
+  assert.match(host.lastNotice().message, /expired/);
+});
+
+test("a refused sign-in stops with the server's reason", async () => {
+  const polls = [];
+  const { host } = await setup(deviceRoute([PENDING, { status: 403, body: { error: "This account is suspended." } }], polls));
+  await host.actions["sign-in-code"]();
+  assert.ok(await until(() => host.lastHeader().status.label === "Signed out"));
+  assert.match(host.lastNotice().message, /Couldn't finish signing in: This account is suspended\./);
+  await until(() => false);
+  assert.equal(polls.length, 2);
+});
+
+test("a dropped connection while waiting is retried, not fatal", async () => {
+  const polls = [];
+  const token = { body: { token: "vcom_tok", user: { login: "alice" } } };
+  const { host } = await setup(deviceRoute([{ status: 502, body: { error: "bad gateway" } }, PENDING, token], polls));
+  await host.actions["sign-in-code"]();
+  assert.ok(await until(() => host.storage.get("session")));
+  assert.equal(polls.length, 3);
+});
+
+test("switching to a code gives up the browser sign-in, so its late link is ignored", async () => {
+  const polls = [];
+  const exchanges = [];
+  const { host } = await setup(
+    deviceRoute([PENDING], polls, (u, init) => {
+      if (u.pathname === "/auth/exchange") exchanges.push(JSON.parse(init.body));
+    })
+  );
+  await host.actions["sign-in"]();
+  const st = new URL(host.opened[0]).searchParams.get("state");
+  await host.actions["sign-in-code"]();
+  assert.equal(host.opened[1], DEVICE.verificationUriComplete);
+  assert.ok(nodes(host.lastView(), "text").some((n) => n.content.includes("BCDF-GHJK")));
+  await host.deepLink(`viboplr://plugin/community/auth?code=late&state=${st}`);
+  await flush();
+  assert.equal(exchanges.length, 0);
+  // And back: the browser sign-in stops the polling.
+  await host.actions["sign-in"]();
+  const asked = polls.length;
+  await until(() => false);
+  assert.ok(polls.length <= asked + 1, "at most the poll already in flight");
+  await host.actions["cancel-sign-in"]();
+});
+
+test("an imported sheet's byline keeps its author and names who shared it", () => {
+  const p = loadPlugin();
+  assert.equal(p._importAuthor(ITEM), "Claude · via @alice");
+  assert.equal(p._importAuthor({ ...ITEM, author: null }), "@alice");
+  assert.ok(p._importAuthor({ ...ITEM, author: "x".repeat(100) }).length <= 64);
 });
 
 test("import installs the sheet through api.cues and remembers where it came from", async () => {
