@@ -221,14 +221,23 @@ test("a proxy's web page instead of JSON is named as such, and requests identify
   assert.ok(host.logs.some((l) => l.level === "warn" && /Browser Isolation/.test(l.message)));
 });
 
-test("My sheets marks published, imported and own sheets differently", async () => {
+test("Mine marks published, imported and own sheets differently", async () => {
   const p = loadPlugin();
   const sheet = { title: "Song", artistName: "Band", sheet: SHEET, updatedAt: 5, author: "Claude" };
   assert.deepEqual(p._localRow(sheet, null, null).actions, ["publish"]);
   assert.equal(p._localRow(sheet, { id: "x" }, null).badge.label, "Published");
   assert.deepEqual(p._localRow(sheet, null, { id: "x", updatedAt: 5 }).actions, []);
   assert.deepEqual(p._localRow(sheet, null, { id: "x", updatedAt: 4 }).actions, ["publish"], "changed since import");
-  assert.equal(p._itemRow({ ...ITEM, version: 2 }, { id: "abc123", version: 1 }).badge.label, "Update");
+});
+
+test("a cue sheet row says when an imported sheet has an update", async () => {
+  const { plugin } = await setup(() => undefined);
+  plugin._state().imports["track:bjork:joga"] = { id: "abc123", version: 1, updatedAt: 1 };
+  const cue = plugin._builtinModules[0];
+  const row = plugin._cardRow(cue, { ...ITEM, version: 2 });
+  assert.equal(row.badge.label, "Update");
+  assert.deepEqual(row.actions, ["update", "page"]);
+  assert.equal(plugin._cardRow(cue, { ...ITEM, id: "other" }).badge, undefined);
 });
 
 test("a share link opens the song and asks to import", async () => {
@@ -240,7 +249,8 @@ test("a share link opens the song and asks to import", async () => {
   await flush();
   assert.deepEqual(host.navigated, ["community"]);
   const view = host.lastView();
-  assert.equal(nodes(view, "tabs")[0].activeTab, "song");
+  assert.equal(nodes(view, "tabs")[0].activeTab, "cue_sheet");
+  assert.equal(nodes(view, "select").find((n) => n.action === "cue-scope").value, "song");
   assert.equal(nodes(view, "confirm")[0].confirmAction, "confirm-import");
 });
 
@@ -249,11 +259,18 @@ const SERVER_ITEM = {
   kind: "subsonic_server",
   title: "Jazz box",
   address: "https://music.example.com",
+  username: "guest",
+  password: "g&t",
   host: "music.example.com",
   tags: ["jazz", "flac"],
   importCount: 2,
   publisher: { login: "alice" },
-  url: "https://community.viboplr.com/c/srv1",
+  url: "https://community.viboplr.com/servers/srv1",
+  card: {
+    title: "Jazz box",
+    facts: ["music.example.com", "jazz, flac"],
+    action: { label: "Add to Viboplr", link: "viboplr://add-collection?kind=subsonic&name=Jazz+box" },
+  },
 };
 
 test("the Servers tab lists servers and Add opens the app's own dialog with the login", async () => {
@@ -262,16 +279,14 @@ test("the Servers tab lists servers and Add opens the app's own dialog with the 
     if (u.pathname === "/v1/items/search" && u.searchParams.get("kind") === "subsonic_server") {
       return { body: { items: [SERVER_ITEM], hasMore: false } };
     }
-    if (u.pathname === "/v1/items/srv1") {
-      return { body: { item: { ...SERVER_ITEM, payload: { url: "https://music.example.com", username: "guest", password: "g&t" } } } };
-    }
     if (u.pathname === "/v1/items/srv1/imported") counted.push(1);
     return { status: 204 };
   });
-  await host.actions.tab({ tabId: "servers" });
+  await host.actions.tab({ tabId: "subsonic_server" });
   const list = nodes(host.lastView(), "track-row-list")[0];
   assert.equal(list.items[0].title, "Jazz box");
-  assert.match(list.items[0].subtitle, /music\.example\.com · jazz, flac · @alice · 2 adds/);
+  assert.equal(list.items[0].subtitle, "music.example.com · jazz, flac · @alice · 2 adds");
+  assert.deepEqual(list.items[0].actions, ["add-server", "page"]);
 
   await host.actions["add-server"]({ itemId: "srv1" });
   await flush();
@@ -285,6 +300,97 @@ test("on an app without requestAdd, Add opens the server's page instead", async 
   const { host } = await setup(() => ({ status: 204 }));
   delete host.api.collections.requestAdd;
   await host.actions["add-server"]({ itemId: "srv1" });
-  assert.deepEqual(host.opened, ["https://community.viboplr.com/c/srv1"]);
+  assert.deepEqual(host.opened, ["https://community.viboplr.com/servers/srv1"]);
   assert.equal(host.addRequests.length, 0);
+});
+
+test("tabs are one per module plus Mine, which has a section per module", async () => {
+  const { host } = await setup(
+    (u) => {
+      if (u.pathname === "/v1/me/items") {
+        return { body: { items: [{ ...ITEM, kind: "cue_sheet" }, SERVER_ITEM] } };
+      }
+      if (u.pathname === "/v1/items/search") return { body: { items: [], hasMore: false } };
+    },
+    { session: { token: "vcom_tok", user: { login: "alice" } } }
+  );
+  await host.addSheet("Jóga", "Björk", SHEET);
+  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["cue_sheet", "subsonic_server", "mine"]);
+
+  await host.actions.tab({ tabId: "mine" });
+  const sections = nodes(host.lastView(), "section");
+  // Cue sheets bring their own section (the sheets on this computer); servers use the generic one.
+  assert.deepEqual(sections.map((n) => n.title), ["Cue sheets on this computer", "Your servers"]);
+  const [sheets, servers] = sections.map((n) => nodes({ children: n.children }, "track-row-list")[0]);
+  assert.equal(sheets.items[0].badge.label, "Published", "matched against your cue sheets online");
+  assert.equal(servers.items[0].title, "Jazz box");
+  assert.deepEqual(servers.items[0].actions, ["page", "edit"]);
+
+  await host.actions.edit({ itemId: "srv1" });
+  assert.equal(host.opened.at(-1), "https://community.viboplr.com/servers/srv1/edit");
+  await host.actions.share({ kind: "subsonic_server" });
+  assert.equal(host.opened.at(-1), "https://community.viboplr.com/servers/new");
+});
+
+test("a module the plugin has never heard of still gets a working tab and Mine section", async () => {
+  const PLAYLIST = {
+    id: "pl1",
+    kind: "playlist",
+    title: "Late night",
+    importCount: 1,
+    publisher: { login: "bob" },
+    url: "https://community.viboplr.com/playlists/pl1",
+    card: { title: "Late night", facts: ["12 tracks"], action: { label: "Play in Viboplr", link: "viboplr://x" } },
+  };
+  const { plugin, host } = await setup(
+    (u) => {
+      if (u.pathname === "/v1/modules") {
+        return {
+          body: {
+            modules: [
+              ...plugin_modules(),
+              {
+                kind: "playlist", slug: "playlists", name: "Playlists", singular: "playlist", intro: "",
+                notice: "Shared playlists.", popularLabel: "Most played", useNoun: ["play", "plays"],
+                url: "https://community.viboplr.com/playlists", shareUrl: null,
+              },
+            ],
+          },
+        };
+      }
+      if (u.pathname === "/v1/items/search" && u.searchParams.get("kind") === "playlist") return { body: { items: [PLAYLIST], hasMore: false } };
+      if (u.pathname === "/v1/me/items") return { body: { items: [PLAYLIST] } };
+      if (u.pathname === "/v1/items/search") return { body: { items: [], hasMore: false } };
+    },
+    { session: { token: "vcom_tok", user: { login: "bob" } } }
+  );
+  await plugin._loadModules();
+  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.label), ["Cue sheets", "Servers", "Playlists", "Mine"]);
+  assert.ok(host.storage.get("modules").some((m) => m.kind === "playlist"), "remembered for the next start");
+
+  await host.actions.tab({ tabId: "playlist" });
+  const view = host.lastView();
+  assert.ok(nodes(view, "text").some((n) => n.content === "Shared playlists."), "the module's notice");
+  const row = nodes(view, "track-row-list")[0];
+  assert.deepEqual(row.actions, [{ id: "page", label: "Open page" }]);
+  assert.deepEqual(row.items[0], { id: "pl1", title: "Late night", subtitle: "12 tracks · @bob · 1 play", actions: ["page"] });
+  await host.actions.page({ itemId: "pl1" });
+  assert.equal(host.opened.at(-1), "https://community.viboplr.com/playlists/pl1");
+
+  await host.actions.tab({ tabId: "mine" });
+  const titles = nodes(host.lastView(), "section").map((n) => n.title);
+  assert.deepEqual(titles, ["Cue sheets on this computer", "Your servers", "Your playlists"]);
+});
+
+// The built-in module descriptions as the server would send them.
+function plugin_modules() {
+  return loadPlugin()._builtinModules;
+}
+
+test("a bad module list from the server is ignored, not fatal", async () => {
+  const { plugin, host } = await setup((u) => {
+    if (u.pathname === "/v1/modules") return { body: { modules: [{ kind: 3 }, null, { name: "no kind" }] } };
+  });
+  await plugin._loadModules();
+  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["cue_sheet", "subsonic_server", "mine"]);
 });

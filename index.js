@@ -1,25 +1,25 @@
-// viboplr-community-plugin — Viboplr Community client: share Now Playing cue
-// sheets and import ones other people made, and add the Subsonic / Navidrome
-// servers their owners opened to everyone.
+// viboplr-community-plugin — Viboplr Community client: what Viboplr listeners
+// share with each other (cue sheets, servers, and whatever comes next).
 //
 // Design notes:
-//  - THE SERVER OWNS ACCOUNTS, THE APP OWNS SHEETS. Sign-in happens in the
-//    browser (GitHub, through community.viboplr.com); the plugin only ever holds the
-//    the server's own revocable `vcom_` token. Sheets are read and written through the
-//    host's api.cues, so every import goes through the app's normalizer — what
-//    lands is exactly what the app would accept from any other writer.
+//  - MODULES COME FROM THE SERVER. GET /v1/modules lists what can be shared,
+//    and every item carries a `card` (title, facts, in-Viboplr action), so a
+//    new module gets a tab and a Mine section here with no plugin release.
+//    INTEGRATIONS adds what only app code can do for a known module (import a
+//    cue sheet, open the Add Server dialog). See "Modules" below.
+//  - THE SERVER OWNS ACCOUNTS, THE APP OWNS WHAT IT HOLDS. Sign-in happens in
+//    the browser (GitHub, through community.viboplr.com); the plugin only ever
+//    holds the server's own revocable `vcom_` token. Cue sheets are written
+//    through the host's api.cues (the app's own normalizer), servers through
+//    api.collections.requestAdd (the app's own Add Server dialog, which the
+//    user confirms).
 //  - PKCE OVER A DEEP LINK. The server hands a one-time code back through
-//    viboplr://plugin/community/auth (scoped, so only this plugin sees it). The code
-//    is useless without the verifier, which never leaves this worker — another
-//    app that claims the viboplr:// scheme gets nothing.
-//  - PROVENANCE LIVES HERE. A sheet file has no "came from the community" field, so
-//    the mapping song → community item (+ the local updatedAt at import) is kept in
-//    this plugin's storage. That is what lets "My sheets" tell an untouched
-//    import (not ours to republish) from one the user has since changed.
-//  - SERVERS GO THROUGH THE APP'S OWN DIALOG. "Add" hands the listing to
-//    api.collections.requestAdd, which opens the same prefilled Add Server
-//    dialog a viboplr://add-collection link opens. The user confirms there;
-//    the plugin never creates a collection itself.
+//    viboplr://plugin/community/auth (scoped, so only this plugin sees it). The
+//    code is useless without the verifier, which never leaves this worker.
+//  - PROVENANCE LIVES HERE. A sheet file has no "came from the community"
+//    field, so the mapping song → community item (+ the local updatedAt at
+//    import) is kept in this plugin's storage. That is what lets Mine tell an
+//    untouched import (not ours to republish) from one the user has changed.
 //  - NOT READY IS A BANNER. A server that can't be reached is shown inside the
 //    view with a Retry, never as a toast (plugin view design guidelines).
 
@@ -34,9 +34,10 @@ var LINK_PREFIX = "viboplr://plugin/community/";
 var USER_AGENT = "Viboplr-Community-Plugin/0.1 (+https://github.com/outcast1000/viboplr-community-plugin)";
 var MAX_AUTHOR_CHARS = 64;
 var FIRST_LOAD_DELAY_MS = 3000;
+var MINE = "mine";
 
 var api = null;
-var state = freshState();
+var state = null; // set up in activate() — BUILTIN_MODULES must exist first
 var firstLoadTimer = null;
 
 function freshState() {
@@ -45,29 +46,26 @@ function freshState() {
     user: null,
     // In-flight browser sign-in: { state, verifier, at }.
     auth: null,
-    tab: "browse",
-    query: "",
-    sort: "recent",
-    results: null,
-    // The Servers tab: its own search, sort and pages.
-    servers: null,
-    serverQuery: "",
-    serverSort: "recent",
-    serverPage: 0,
-    serverMore: false,
-    page: 0,
-    more: false,
-    // The song the "This song" tab is about: { title, artist }.
-    song: null,
-    songItems: null,
-    // api.cues.list() rows, and the server's view of what the user published,
-    // keyed by songKey.
-    local: null,
-    published: {},
-    // songKey → { id, version, updatedAt } for sheets imported from the community.
-    imports: {},
+    // What can be shared (GET /v1/modules); BUILTIN_MODULES until it answers.
+    modules: BUILTIN_MODULES.slice(),
+    // The tab: a module's kind, or "mine".
+    tab: BUILTIN_MODULES[0].kind,
+    // Per module: { query, sort, page, items, more }.
+    browse: {},
+    // Per module: the items this user shared (GET /v1/me/items).
+    shared: {},
     loading: false,
     error: null,
+    // --- cue sheets ---
+    // Everything ("all"), or the sheets for one song ("song").
+    cueScope: "all",
+    // The song the cue sheets are narrowed to: { title, artist }.
+    song: null,
+    songItems: null,
+    // api.cues.list() rows.
+    local: null,
+    // songKey → { id, version, updatedAt } for sheets imported from the community.
+    imports: {},
     // A pending in-view question: { kind: "import" | "replace", id, title, artist, by }.
     confirm: null,
     lastPublishedUrl: null,
@@ -136,66 +134,161 @@ function plural(n, one, many) {
   return n + " " + (n === 1 ? one : many);
 }
 
-function modeLabel(mode) {
-  return mode === "clip" ? "lyric clip" : "cards";
-}
-
-// One community item → a track-row-list row. `imported` is this song's import
-// record, if any.
-function itemRow(item, imported) {
-  var bits = [];
-  if (item.artistName) bits.push(item.artistName);
-  bits.push(plural(item.cueCount || 0, "cue", "cues") + " · " + modeLabel(item.mode));
-  if (item.publisher && item.publisher.login) bits.push("@" + item.publisher.login);
-  if (item.importCount) bits.push(plural(item.importCount, "import", "imports"));
-  var row = {
-    id: item.id,
-    title: item.title,
-    subtitle: bits.join(" · "),
-    artistName: item.artistName || null,
-    albumTitle: item.albumName || null,
-  };
-  if (imported && imported.id === item.id) {
-    if (imported.version < item.version) {
-      row.badge = { label: "Update", variant: "accent" };
-      row.actions = ["update", "page"];
-    } else {
-      row.badge = { label: "Imported", variant: "success" };
-      row.actions = ["page"];
-    }
-  } else {
-    row.actions = ["import", "page"];
-  }
-  return row;
-}
-
-// One local sheet → a "My sheets" row, given what the server says the user
-// published and what was imported.
-function localRow(sheet, published, imported) {
-  var key = songKey(sheet.title, sheet.artistName);
-  var cues = (sheet.sheet && sheet.sheet.cues) || [];
-  var bits = [];
-  if (sheet.artistName) bits.push(sheet.artistName);
-  bits.push(plural(cues.length, "cue", "cues") + " · " + modeLabel(sheet.sheet && sheet.sheet.mode));
-  if (sheet.author) bits.push(sheet.author);
-  var row = { id: key, title: sheet.title, subtitle: bits.join(" · "), artistName: sheet.artistName || null, albumTitle: sheet.albumName || null };
-  var untouchedImport = imported && imported.updatedAt === sheet.updatedAt;
-  if (published) {
-    row.badge = { label: "Published", variant: "success" };
-    row.actions = ["republish", "unpublish", "page"];
-  } else if (untouchedImport) {
-    row.badge = { label: "From the community", variant: "muted" };
-    row.actions = [];
-  } else {
-    row.actions = ["publish"];
-  }
-  return row;
-}
-
 function errorText(e) {
   if (!e) return "Unknown error";
   return e.message || String(e);
 }
+
+// ---------------------------------------------------------------------------
+// Modules
+// ---------------------------------------------------------------------------
+//
+// Generic: every module gets a tab (search, sort, load more, rows from each
+// item's card, "Open page", "Share" when the module has a website form) and a
+// Mine section (what you shared, with Open page / Edit). INTEGRATIONS, keyed
+// by kind, adds what only app code can do. A module with no integration still
+// works — it just can't do more than the website does.
+
+// Until the server answers (or when it can't be reached on a first start).
+var BUILTIN_MODULES = [
+  {
+    kind: "cue_sheet",
+    slug: "cue-sheets",
+    name: "Cue sheets",
+    singular: "cue sheet",
+    notice: "",
+    popularLabel: "Most imported",
+    useNoun: ["import", "imports"],
+    url: SERVER + "/cue-sheets",
+    shareUrl: null,
+  },
+  {
+    kind: "subsonic_server",
+    slug: "servers",
+    name: "Servers",
+    singular: "server",
+    notice: "Listings carry their owner's shared login in plain text. Treat them as public.",
+    popularLabel: "Most added",
+    useNoun: ["add", "adds"],
+    url: SERVER + "/servers",
+    shareUrl: SERVER + "/servers/new",
+  },
+];
+
+// Only modules whose description is usable; anything else is ignored rather
+// than breaking the view.
+function validModules(list) {
+  if (!Array.isArray(list)) return [];
+  return list.filter(function (m) {
+    return m && typeof m.kind === "string" && typeof m.name === "string" && typeof m.url === "string" && m.kind !== MINE;
+  });
+}
+
+function moduleFor(kind) {
+  for (var i = 0; i < state.modules.length; i++) if (state.modules[i].kind === kind) return state.modules[i];
+  return null;
+}
+
+function currentModule() {
+  return moduleFor(state.tab);
+}
+
+function uses(m, n) {
+  var noun = m && Array.isArray(m.useNoun) ? m.useNoun[n === 1 ? 0 : 1] : n === 1 ? "use" : "uses";
+  return n + " " + noun;
+}
+
+// Any item → a row, from its card alone. An integration may then adjust it.
+function cardRow(m, item) {
+  var card = item.card || { title: item.title, facts: [] };
+  var bits = (card.facts || []).slice();
+  if (item.publisher && item.publisher.login) bits.push("@" + item.publisher.login);
+  if (item.importCount) bits.push(uses(m, item.importCount));
+  var row = { id: item.id, title: card.title || item.title, subtitle: bits.join(" · "), actions: ["page"] };
+  var integration = INTEGRATIONS[m.kind];
+  return integration && integration.row ? integration.row(item, row) : row;
+}
+
+function browseState(kind) {
+  if (!state.browse[kind]) state.browse[kind] = { query: "", sort: "recent", page: 0, items: null, more: false };
+  return state.browse[kind];
+}
+
+// ---------------------------------------------------------------------------
+// Integrations: what app code does for a known module
+// ---------------------------------------------------------------------------
+//
+//   actions    extra row actions [{ id, label }] (handlers live in ACTIONS)
+//   row        (item, row) → row: badges, which actions this row shows
+//   controls   () → nodes shown above the module's list
+//   body       () → nodes replacing the generic list, or null for the generic one
+//   load       () → Promise replacing the generic load, or null
+//   mine       { title, nodes(), load() } — the module's Mine section, in
+//              place of the generic "what you shared" list
+
+var INTEGRATIONS = {
+  cue_sheet: {
+    actions: [
+      { id: "import", label: "Import" },
+      { id: "update", label: "Update" },
+    ],
+    row: function (item, row) {
+      row.artistName = item.artistName || null;
+      row.albumTitle = item.albumName || null;
+      var imported = state.imports[songKey(item.title, item.artistName)];
+      if (imported && imported.id === item.id) {
+        if (imported.version < item.version) {
+          row.badge = { label: "Update", variant: "accent" };
+          row.actions = ["update", "page"];
+        } else {
+          row.badge = { label: "Imported", variant: "success" };
+          row.actions = ["page"];
+        }
+      } else {
+        row.actions = ["import", "page"];
+      }
+      return row;
+    },
+    controls: function () {
+      return [
+        {
+          type: "select",
+          label: "Show",
+          action: "cue-scope",
+          value: state.cueScope,
+          options: [
+            { value: "all", label: "All cue sheets" },
+            { value: "song", label: "For one song" },
+          ],
+        },
+      ];
+    },
+    body: function () {
+      return state.cueScope === "song" ? songNodes() : null;
+    },
+    load: function () {
+      return state.cueScope === "song" ? loadSong(state.song || currentSong()) : null;
+    },
+    mine: {
+      title: "Cue sheets on this computer",
+      load: function () {
+        return api.cues.list().then(function (rows) {
+          state.local = rows;
+        });
+      },
+      nodes: function () {
+        return mySheetNodes();
+      },
+    },
+  },
+  subsonic_server: {
+    actions: [{ id: "add-server", label: "Add" }],
+    row: function (item, row) {
+      row.actions = ["add-server", "page"];
+      return row;
+    },
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Host plumbing
@@ -279,10 +372,14 @@ function saveSession() {
   return api.storage.set("session", state.token ? { token: state.token, user: state.user } : null);
 }
 
+function clearShared() {
+  state.shared = {};
+}
+
 function sessionLost() {
   state.token = null;
   state.user = null;
-  state.published = {};
+  clearShared();
   saveSession().catch(function (e) {
     api.log("error", "Couldn't clear the stored session: " + errorText(e));
   });
@@ -341,7 +438,7 @@ function finishSignIn(params) {
     .then(function () {
       notify("Signed in to Viboplr Community as @" + state.user.login + ".");
       render();
-      return loadPublished();
+      return loadShared();
     })
     .catch(function (e) {
       render();
@@ -353,14 +450,14 @@ function signOut() {
   var revoke = state.token ? request("DELETE", "/v1/tokens/current", undefined, true) : Promise.resolve();
   return revoke
     .catch(function (e) {
-      // Signing out locally still happens; the server's /me page can revoke the
-      // session later.
+      // Signing out locally still happens; the website's account page can
+      // revoke the session later.
       api.log("warn", "Couldn't revoke the server session: " + errorText(e));
     })
     .then(function () {
       state.token = null;
       state.user = null;
-      state.published = {};
+      clearShared();
       return saveSession();
     })
     .then(function () {
@@ -388,17 +485,107 @@ function withLoading(work) {
     });
 }
 
-function loadBrowse(page) {
+// Ask the server what can be shared; keep the answer for the next start.
+function loadModules() {
+  return request("GET", "/v1/modules")
+    .then(function (data) {
+      var mods = validModules(data && data.modules);
+      if (!mods.length) return;
+      state.modules = mods;
+      if (state.tab !== MINE && !moduleFor(state.tab)) state.tab = mods[0].kind;
+      render();
+      return api.storage.set("modules", mods);
+    })
+    .catch(function (e) {
+      api.log("warn", "Couldn't load the module list, using the last known one: " + errorText(e));
+    });
+}
+
+function loadList(kind, page) {
+  var b = browseState(kind);
   page = page || 0;
   return withLoading(function () {
-    return request("GET", "/v1/items/search?" + queryString({ kind: "cue_sheet", q: state.query, sort: state.sort, page: page })).then(
-      function (data) {
-        state.results = page > 0 && state.results ? state.results.concat(data.items) : data.items;
-        state.page = page;
-        state.more = !!data.hasMore;
-      }
-    );
+    return request("GET", "/v1/items/search?" + queryString({ kind: kind, q: b.query, sort: b.sort, page: page })).then(function (data) {
+      b.items = page > 0 && b.items ? b.items.concat(data.items) : data.items;
+      b.page = page;
+      b.more = !!data.hasMore;
+    });
   });
+}
+
+// The current module's tab: its integration's own load, else the generic list
+// (fetched once; search, sort and paging refetch).
+function loadTab() {
+  var m = currentModule();
+  if (!m) return Promise.resolve(render());
+  var integration = INTEGRATIONS[m.kind];
+  var custom = integration && integration.load ? integration.load() : null;
+  if (custom) return custom;
+  if (!browseState(m.kind).items) return loadList(m.kind, 0);
+  render();
+  return Promise.resolve();
+}
+
+// What this user shared, per module.
+function loadShared() {
+  if (!state.token) {
+    clearShared();
+    return Promise.resolve();
+  }
+  return request("GET", "/v1/me/items", undefined, true).then(function (data) {
+    var byKind = {};
+    data.items.forEach(function (item) {
+      (byKind[item.kind] = byKind[item.kind] || []).push(item);
+    });
+    state.shared = byKind;
+    render();
+  });
+}
+
+function loadMine() {
+  return withLoading(function () {
+    var loads = state.modules.map(function (m) {
+      var integration = INTEGRATIONS[m.kind];
+      return integration && integration.mine && integration.mine.load ? integration.mine.load() : Promise.resolve();
+    });
+    return Promise.all(loads).then(loadShared);
+  });
+}
+
+function switchTab(tab) {
+  state.tab = tab === MINE || moduleFor(tab) ? tab : state.modules[0].kind;
+  state.error = null;
+  return state.tab === MINE ? loadMine() : loadTab();
+}
+
+function knownItem(id) {
+  var lists = [state.songItems || []];
+  Object.keys(state.browse).forEach(function (k) {
+    lists.push(state.browse[k].items || []);
+  });
+  Object.keys(state.shared).forEach(function (k) {
+    lists.push(state.shared[k]);
+  });
+  for (var i = 0; i < lists.length; i++) {
+    for (var j = 0; j < lists[i].length; j++) if (lists[i][j].id === id) return lists[i][j];
+  }
+  return null;
+}
+
+// An item's page on the website (every item's JSON carries its own `url`).
+function pageFor(id) {
+  var item = knownItem(id);
+  if (item) return item.url;
+  var m = currentModule();
+  return (m ? m.url : SERVER) + "/" + encodeURIComponent(id);
+}
+
+// ---------------------------------------------------------------------------
+// Cue sheets
+// ---------------------------------------------------------------------------
+
+function cueModule() {
+  return moduleFor("cue_sheet") || BUILTIN_MODULES[0];
 }
 
 function loadSong(song) {
@@ -412,99 +599,20 @@ function loadSong(song) {
   });
 }
 
-function loadPublished() {
-  if (!state.token) {
-    state.published = {};
-    return Promise.resolve();
-  }
-  return request("GET", "/v1/me/items", undefined, true).then(function (data) {
-    var byKey = {};
-    data.items.forEach(function (item) {
-      byKey[songKey(item.title, item.artistName)] = item;
-    });
-    state.published = byKey;
-    render();
-  });
-}
-
-function loadMine() {
-  return withLoading(function () {
-    return api.cues.list().then(function (rows) {
-      state.local = rows;
-      return loadPublished();
-    });
-  });
-}
-
 function currentSong() {
   var t = api.playback && api.playback.getCurrentTrack ? api.playback.getCurrentTrack() : null;
   return t && t.title ? { title: t.title, artist: t.artist_name || null } : null;
 }
 
-function switchTab(tab) {
-  state.tab = tab;
-  state.error = null;
-  if (tab === "browse" && !state.results) return loadBrowse(0);
-  if (tab === "song") return loadSong(state.song || currentSong());
-  if (tab === "mine") return loadMine();
-  if (tab === "servers" && !state.servers) return loadServers(0);
-  render();
-  return Promise.resolve();
+// Narrow the cue sheets to one song (context menu, share link).
+function showSong(song) {
+  state.tab = "cue_sheet";
+  state.cueScope = "song";
+  return loadSong(song);
 }
 
-// ---------------------------------------------------------------------------
-// Import / publish
-// ---------------------------------------------------------------------------
-
-function loadServers(page) {
-  page = page || 0;
-  return withLoading(function () {
-    return request(
-      "GET",
-      "/v1/items/search?" + queryString({ kind: "subsonic_server", q: state.serverQuery, sort: state.serverSort, page: page })
-    ).then(function (data) {
-      state.servers = page > 0 && state.servers ? state.servers.concat(data.items) : data.items;
-      state.serverPage = page;
-      state.serverMore = !!data.hasMore;
-    });
-  });
-}
-
-// Offer a listed server to the user through the app's own Add Server dialog.
-// The listing's login is only on the single read, so fetch it first.
-function addServer(id) {
-  if (!api.collections || typeof api.collections.requestAdd !== "function") {
-    // Older app: the website's Add button opens the same dialog by deep link.
-    return api.network.openUrl(SERVER + "/c/" + encodeURIComponent(id));
-  }
-  return request("GET", "/v1/items/" + encodeURIComponent(id))
-    .then(function (data) {
-      var item = data.item;
-      var p = item.payload || {};
-      return api.collections
-        .requestAdd({ kind: "subsonic", name: item.title, url: p.url, username: p.username || "", password: p.password || "" })
-        .then(function () {
-          request("POST", "/v1/items/" + encodeURIComponent(item.id) + "/imported").catch(function (e) {
-            api.log("warn", "Couldn't count the add: " + errorText(e));
-          });
-        });
-    })
-    .catch(function (e) {
-      if (e && e.status === 404) notify("That server isn't listed any more.");
-      else fail("Couldn't add that server", e);
-    });
-}
-
-function knownItem(id) {
-  var lists = [state.results || [], state.songItems || [], state.servers || []];
-  for (var i = 0; i < lists.length; i++) {
-    for (var j = 0; j < lists[i].length; j++) if (lists[i][j].id === id) return lists[i][j];
-  }
-  return null;
-}
-
-// Import a community item. Asks first when it would replace a local sheet that
-// isn't this same item, untouched.
+// Import a community sheet. Asks first when it would replace a local sheet
+// that isn't this same item, untouched.
 function importItem(id, confirmed) {
   return request("GET", "/v1/items/" + encodeURIComponent(id))
     .then(function (data) {
@@ -528,9 +636,7 @@ function importItem(id, confirmed) {
             return api.storage.set("imports", state.imports);
           })
           .then(function () {
-            request("POST", "/v1/items/" + encodeURIComponent(item.id) + "/imported").catch(function (e) {
-              api.log("warn", "Couldn't count the import: " + errorText(e));
-            });
+            countUse(item.id);
             state.local = null;
             notify("Imported the cue sheet for “" + item.title + "”. It plays in Now Playing.");
             render();
@@ -542,10 +648,22 @@ function importItem(id, confirmed) {
     });
 }
 
+function countUse(id) {
+  request("POST", "/v1/items/" + encodeURIComponent(id) + "/imported").catch(function (e) {
+    api.log("warn", "Couldn't count the use: " + errorText(e));
+  });
+}
+
 function requireSignIn(what) {
   if (state.token) return true;
   notify("Sign in with GitHub to " + what + ".", { action: { label: "Sign in", id: "sign-in" } });
   return false;
+}
+
+function sharedSheet(key) {
+  var list = state.shared.cue_sheet || [];
+  for (var i = 0; i < list.length; i++) if (songKey(list[i].title, list[i].artistName) === key) return list[i];
+  return null;
 }
 
 function publishSong(title, artist) {
@@ -577,7 +695,10 @@ function publishSong(title, artist) {
         },
         true
       ).then(function (data) {
-        state.published[key] = data.item;
+        var list = (state.shared.cue_sheet || []).filter(function (it) {
+          return it.id !== data.item.id;
+        });
+        state.shared.cue_sheet = list.concat([data.item]);
         state.lastPublishedUrl = data.item.url;
         notify((data.created ? "Published “" : "Updated “") + row.title + "” on Viboplr Community.", {
           action: { label: "Open page", id: "open-last-published" },
@@ -590,12 +711,14 @@ function publishSong(title, artist) {
     });
 }
 
-function unpublish(key) {
-  var item = state.published[key];
+function unpublishSheet(key) {
+  var item = sharedSheet(key);
   if (!item) return Promise.resolve();
   return request("DELETE", "/v1/items/" + encodeURIComponent(item.id), undefined, true)
     .then(function () {
-      delete state.published[key];
+      state.shared.cue_sheet = (state.shared.cue_sheet || []).filter(function (it) {
+        return it.id !== item.id;
+      });
       notify("Unpublished “" + item.title + "”. Your own copy is unchanged.");
       render();
     })
@@ -610,6 +733,65 @@ function localByKey(key) {
   return null;
 }
 
+// One local sheet → a row in Mine, given what the user published and imported.
+function localRow(sheet, published, imported) {
+  var key = songKey(sheet.title, sheet.artistName);
+  var cues = (sheet.sheet && sheet.sheet.cues) || [];
+  var bits = [];
+  if (sheet.artistName) bits.push(sheet.artistName);
+  bits.push(plural(cues.length, "cue", "cues") + " · " + (sheet.sheet && sheet.sheet.mode === "clip" ? "lyric clip" : "cards"));
+  if (sheet.author) bits.push(sheet.author);
+  var row = { id: key, title: sheet.title, subtitle: bits.join(" · "), artistName: sheet.artistName || null, albumTitle: sheet.albumName || null };
+  var untouchedImport = imported && imported.updatedAt === sheet.updatedAt;
+  if (published) {
+    row.badge = { label: "Published", variant: "success" };
+    row.actions = ["republish", "unpublish", "sheet-page"];
+  } else if (untouchedImport) {
+    row.badge = { label: "From the community", variant: "muted" };
+    row.actions = [];
+  } else {
+    row.actions = ["publish"];
+  }
+  return row;
+}
+
+function songNodes() {
+  if (!state.song) {
+    return [{ type: "text", content: "Play a song, or right-click a track and choose “Find shared cue sheets”." }];
+  }
+  var nodes = [{ type: "text", content: (state.song.artist ? state.song.artist + " — " : "") + state.song.title, className: "ds-heading" }];
+  if (state.loading && !state.songItems) nodes.push({ type: "loading", message: "Looking in the community…" });
+  else if (state.songItems && state.songItems.length === 0) nodes.push({ type: "text", content: "Nobody has shared a cue sheet for this song yet." });
+  else if (state.songItems) nodes.push(listNode(cueModule(), state.songItems));
+  return nodes;
+}
+
+function mySheetNodes() {
+  var rows = state.local || [];
+  if (rows.length === 0) {
+    return [{ type: "text", content: "You have no cue sheets yet. Ask your AI assistant to write one for a song, or import one." }];
+  }
+  return [
+    {
+      type: "track-row-list",
+      selectable: true,
+      selectionMode: "single",
+      artwork: "cached",
+      contextMenu: false,
+      actions: [
+        { id: "publish", label: "Publish" },
+        { id: "republish", label: "Update online" },
+        { id: "unpublish", label: "Unpublish" },
+        { id: "sheet-page", label: "Open page" },
+      ],
+      items: rows.map(function (sheet) {
+        var key = songKey(sheet.title, sheet.artistName);
+        return localRow(sheet, sharedSheet(key), state.imports[key]);
+      }),
+    },
+  ];
+}
+
 // A share link (viboplr://plugin/community/open?id=…): show the song, ask to import.
 function openShared(id) {
   if (!id) return Promise.resolve();
@@ -617,13 +799,44 @@ function openShared(id) {
   return request("GET", "/v1/items/" + encodeURIComponent(id))
     .then(function (data) {
       var item = data.item;
-      state.tab = "song";
       state.confirm = { kind: "import", id: item.id, title: item.title, artist: item.artistName, by: item.publisher.login };
-      return loadSong({ title: item.title, artist: item.artistName });
+      return showSong({ title: item.title, artist: item.artistName });
     })
     .catch(function (e) {
       if (e && e.status === 404) notify("That cue sheet isn't in the community any more.");
       else fail("Couldn't open that cue sheet", e);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Servers
+// ---------------------------------------------------------------------------
+
+// Offer a listed server through the app's own Add Server dialog. A listing
+// carries its (public) login, so the row we have is enough.
+function addServer(id) {
+  if (!api.collections || typeof api.collections.requestAdd !== "function") {
+    // Older app: the website's Add button opens the same dialog by deep link.
+    var listed = knownItem(id);
+    return api.network.openUrl(listed ? listed.url : (moduleFor("subsonic_server") || BUILTIN_MODULES[1]).url + "/" + encodeURIComponent(id));
+  }
+  var known = knownItem(id);
+  var item = known
+    ? Promise.resolve(known)
+    : request("GET", "/v1/items/" + encodeURIComponent(id)).then(function (d) {
+        return d.item;
+      });
+  return item
+    .then(function (item) {
+      return api.collections
+        .requestAdd({ kind: "subsonic", name: item.title, url: item.address, username: item.username || "", password: item.password || "" })
+        .then(function () {
+          countUse(item.id);
+        });
+    })
+    .catch(function (e) {
+      if (e && e.status === 404) notify("That server isn't listed any more.");
+      else fail("Couldn't add that server", e);
     });
 }
 
@@ -657,152 +870,111 @@ function banner(text, variant, buttons) {
   };
 }
 
-function itemRowList(items) {
+// A module's items as a list. Row actions: the integration's, then "Open page".
+function listNode(m, items) {
+  var integration = INTEGRATIONS[m.kind] || {};
   return {
     type: "track-row-list",
     selectable: true,
     selectionMode: "single",
     artwork: "cached",
     contextMenu: false,
-    actions: [
-      { id: "import", label: "Import" },
-      { id: "update", label: "Update" },
-      { id: "page", label: "Open page" },
-    ],
+    actions: (integration.actions || []).concat([{ id: "page", label: "Open page" }]),
     items: items.map(function (item) {
-      return itemRow(item, state.imports[songKey(item.title, item.artistName)]);
+      return cardRow(m, item);
     }),
   };
 }
 
-function browseNodes() {
-  var nodes = [
-    { type: "search-input", placeholder: "Search artist, song or album", action: "search", value: state.query, submitOnly: true, buttonLabel: "Search" },
+function shareButton(m) {
+  return m.shareUrl ? { type: "button", label: "Share a " + m.singular, action: "share", variant: "secondary", data: { kind: m.kind } } : null;
+}
+
+// One module's tab: notice, its controls, then its list (or the integration's own body).
+function moduleNodes(m) {
+  var integration = INTEGRATIONS[m.kind] || {};
+  var nodes = [];
+  var controls = integration.controls ? integration.controls() : [];
+  var body = integration.body ? integration.body() : null;
+  if (body) return nodes.concat(controls, body, noticeNodes(m));
+  var b = browseState(m.kind);
+  nodes.push({ type: "search-input", placeholder: "Search " + m.name.toLowerCase(), action: "search", value: b.query, submitOnly: true, buttonLabel: "Search" });
+  var row = controls.concat([
     {
       type: "select",
       label: "Sort",
       action: "sort",
-      value: state.sort,
+      value: b.sort,
       options: [
         { value: "recent", label: "Recent" },
-        { value: "popular", label: "Most imported" },
+        { value: "popular", label: m.popularLabel || "Popular" },
       ],
     },
-  ];
-  if (state.loading && !state.results) nodes.push({ type: "loading", message: "Loading cue sheets…" });
-  else if (state.results && state.results.length === 0) {
-    nodes.push({ type: "text", content: state.query ? "No cue sheets match that search." : "Nothing shared yet. Publish one from My sheets to be the first." });
-  } else if (state.results) {
-    nodes.push(itemRowList(state.results));
-    if (state.more) nodes.push({ type: "button", label: state.loading ? "Loading…" : "Load more", action: "more", variant: "secondary", disabled: state.loading });
+  ]);
+  var share = shareButton(m);
+  if (share) row.push(share);
+  nodes.push({ type: "layout", direction: "horizontal", children: row });
+  nodes = nodes.concat(noticeNodes(m));
+  if (state.loading && !b.items) nodes.push({ type: "loading", message: "Loading " + m.name.toLowerCase() + "…" });
+  else if (b.items && b.items.length === 0) {
+    nodes.push({ type: "text", content: b.query ? "Nothing matches that search." : "Nothing shared yet." });
+  } else if (b.items) {
+    nodes.push(listNode(m, b.items));
+    if (b.more) nodes.push({ type: "button", label: state.loading ? "Loading…" : "Load more", action: "more", variant: "secondary", disabled: state.loading });
   }
   return nodes;
 }
 
-function songNodes() {
-  if (!state.song) {
-    return [{ type: "text", content: "Play a song, or right-click a track and choose “Find shared cue sheets”." }];
+function noticeNodes(m) {
+  return m.notice ? [{ type: "text", content: m.notice, className: "ds-muted" }] : [];
+}
+
+// Mine: one section per module — the integration's own, else what you shared.
+function mineNodes() {
+  var nodes = [];
+  if (!state.token) {
+    nodes.push(banner("Sign in with GitHub to share, and to see what you've shared.", "muted", [{ type: "button", label: "Sign in", action: "sign-in", variant: "accent" }]));
   }
-  var nodes = [{ type: "text", content: (state.song.artist ? state.song.artist + " — " : "") + state.song.title, className: "ds-heading" }];
-  if (state.loading && !state.songItems) nodes.push({ type: "loading", message: "Looking in the community…" });
-  else if (state.songItems && state.songItems.length === 0) nodes.push({ type: "text", content: "Nobody has shared a cue sheet for this song yet." });
-  else if (state.songItems) nodes.push(itemRowList(state.songItems));
+  if (state.loading && !state.local && !Object.keys(state.shared).length) {
+    nodes.push({ type: "loading", message: "Reading what's yours…" });
+    return nodes;
+  }
+  state.modules.forEach(function (m) {
+    var integration = INTEGRATIONS[m.kind];
+    if (integration && integration.mine) {
+      nodes.push({ type: "section", title: integration.mine.title, children: integration.mine.nodes() });
+    } else {
+      nodes.push({ type: "section", title: "Your " + m.name.toLowerCase(), children: sharedNodes(m) });
+    }
+  });
   return nodes;
 }
 
-// One server listing → a row.
-function serverRow(item) {
-  var bits = [];
-  if (item.host) bits.push(item.host);
-  if (item.tags && item.tags.length) bits.push(item.tags.join(", "));
-  if (item.publisher && item.publisher.login) bits.push("@" + item.publisher.login);
-  if (item.importCount) bits.push(plural(item.importCount, "add", "adds"));
-  return { id: item.id, title: item.title, subtitle: bits.join(" · "), actions: ["add-server", "page"] };
-}
-
-function serverNodes() {
-  var nodes = [
+// The generic Mine section: the items you shared in a module.
+function sharedNodes(m) {
+  var share = shareButton(m);
+  var tail = share ? [share] : [];
+  if (!state.token) return [{ type: "text", content: "Sign in to see the " + m.name.toLowerCase() + " you shared." }].concat(tail);
+  var mine = state.shared[m.kind] || [];
+  if (!mine.length) return [{ type: "text", content: "You haven't shared any " + m.name.toLowerCase() + "." }].concat(tail);
+  var actions = [{ id: "page", label: "Open page" }];
+  if (m.shareUrl) actions.push({ id: "edit", label: "Edit" });
+  return [
     {
-      type: "search-input",
-      placeholder: "Search name, description, address or tag",
-      action: "search-servers",
-      value: state.serverQuery,
-      submitOnly: true,
-      buttonLabel: "Search",
-    },
-    {
-      type: "layout",
-      direction: "horizontal",
-      children: [
-        {
-          type: "select",
-          label: "Sort",
-          action: "sort-servers",
-          value: state.serverSort,
-          options: [
-            { value: "recent", label: "Recent" },
-            { value: "popular", label: "Most added" },
-          ],
-        },
-        { type: "button", label: "List a server", action: "list-server", variant: "secondary" },
-      ],
-    },
-  ];
-  if (state.loading && !state.servers) nodes.push({ type: "loading", message: "Loading servers…" });
-  else if (state.servers && state.servers.length === 0) {
-    nodes.push({ type: "text", content: state.serverQuery ? "No servers match that search." : "No servers listed yet. Run one you're happy to share? List it." });
-  } else if (state.servers) {
-    nodes.push({ type: "text", content: "Servers their owners opened to everyone. Add puts one in your library, after you confirm.", className: "ds-muted" });
-    nodes.push({
       type: "track-row-list",
       selectable: true,
       selectionMode: "single",
       contextMenu: false,
-      actions: [
-        { id: "add-server", label: "Add" },
-        { id: "page", label: "Open page" },
-      ],
-      items: state.servers.map(serverRow),
-    });
-    if (state.serverMore) {
-      nodes.push({ type: "button", label: state.loading ? "Loading…" : "Load more", action: "more-servers", variant: "secondary", disabled: state.loading });
-    }
-  }
-  return nodes;
-}
-
-function mineNodes() {
-  var nodes = [];
-  if (!state.token) {
-    nodes.push(banner("Sign in with GitHub to publish your sheets.", "muted", [{ type: "button", label: "Sign in", action: "sign-in", variant: "accent" }]));
-  }
-  if (state.loading && !state.local) {
-    nodes.push({ type: "loading", message: "Reading your cue sheets…" });
-    return nodes;
-  }
-  var rows = state.local || [];
-  if (rows.length === 0) {
-    nodes.push({ type: "text", content: "You have no cue sheets yet. Ask your AI assistant to write one for a song, or import one from Browse." });
-    return nodes;
-  }
-  nodes.push({
-    type: "track-row-list",
-    selectable: true,
-    selectionMode: "single",
-    artwork: "cached",
-    contextMenu: false,
-    actions: [
-      { id: "publish", label: "Publish" },
-      { id: "republish", label: "Update online" },
-      { id: "unpublish", label: "Unpublish" },
-      { id: "page", label: "Open page" },
-    ],
-    items: rows.map(function (sheet) {
-      var key = songKey(sheet.title, sheet.artistName);
-      return localRow(sheet, state.published[key], state.imports[key]);
-    }),
-  });
-  return nodes;
+      actions: actions,
+      items: mine.map(function (item) {
+        var row = cardRow(m, item);
+        row.actions = actions.map(function (a) {
+          return a.id;
+        });
+        return row;
+      }),
+    },
+  ].concat(tail);
 }
 
 function confirmNode() {
@@ -839,12 +1011,11 @@ function render() {
       type: "tabs",
       action: "tab",
       activeTab: state.tab,
-      tabs: [
-        { id: "browse", label: "Browse" },
-        { id: "song", label: "This song" },
-        { id: "mine", label: "My sheets", count: state.local ? state.local.length : undefined },
-        { id: "servers", label: "Servers" },
-      ],
+      tabs: state.modules
+        .map(function (m) {
+          return { id: m.kind, label: m.name };
+        })
+        .concat([{ id: MINE, label: "Mine" }]),
     },
   ];
   if (state.confirm) children.push(confirmNode());
@@ -856,8 +1027,8 @@ function render() {
   if (state.error) {
     children.push(banner("Couldn't reach Viboplr Community: " + state.error, "warning", [{ type: "button", label: "Try again", action: "retry", variant: "accent" }]));
   }
-  var body =
-    state.tab === "song" ? songNodes() : state.tab === "mine" ? mineNodes() : state.tab === "servers" ? serverNodes() : browseNodes();
+  var m = currentModule();
+  var body = state.tab === MINE || !m ? mineNodes() : moduleNodes(m);
   api.ui.setViewData(VIEW, { type: "layout", direction: "vertical", children: children.concat(body) }, { scrollKey: state.tab });
 }
 
@@ -869,63 +1040,53 @@ function rowId(payload) {
   return payload && (payload.itemId || (payload.selectedIds && payload.selectedIds[0]));
 }
 
-function pageFor(id) {
-  var item = knownItem(id);
-  return item ? item.url : SERVER + "/c/" + encodeURIComponent(id);
-}
-
 var ACTIONS = {
+  // --- every module ---
   tab: function (p) {
     return switchTab(p && p.tabId);
   },
   search: function (p) {
-    state.query = (p && p.query) || "";
-    return loadBrowse(0);
-  },
-  "search-servers": function (p) {
-    state.serverQuery = (p && p.query) || "";
-    return loadServers(0);
-  },
-  "sort-servers": function (p) {
-    state.serverSort = p && p.value === "popular" ? "popular" : "recent";
-    return loadServers(0);
-  },
-  "more-servers": function () {
-    return loadServers(state.serverPage + 1);
-  },
-  "add-server": function (p) {
-    return addServer(rowId(p));
-  },
-  "list-server": function () {
-    return api.network.openUrl(SERVER + "/servers/new");
+    var m = currentModule();
+    if (!m) return;
+    browseState(m.kind).query = (p && p.query) || "";
+    return loadList(m.kind, 0);
   },
   sort: function (p) {
-    state.sort = p && p.value === "popular" ? "popular" : "recent";
-    return loadBrowse(0);
+    var m = currentModule();
+    if (!m) return;
+    browseState(m.kind).sort = p && p.value === "popular" ? "popular" : "recent";
+    return loadList(m.kind, 0);
   },
   more: function () {
-    return loadBrowse(state.page + 1);
+    var m = currentModule();
+    if (!m) return;
+    return loadList(m.kind, browseState(m.kind).page + 1);
+  },
+  page: function (p) {
+    return api.network.openUrl(pageFor(rowId(p)));
+  },
+  edit: function (p) {
+    return api.network.openUrl(pageFor(rowId(p)) + "/edit");
+  },
+  share: function (p) {
+    var m = moduleFor(p && p.kind) || currentModule();
+    return m && m.shareUrl ? api.network.openUrl(m.shareUrl) : undefined;
   },
   retry: function () {
     state.error = null;
-    if (state.tab === "song") return loadSong(state.song || currentSong());
-    if (state.tab === "mine") return loadMine();
-    if (state.tab === "servers") return loadServers(0);
-    return loadBrowse(0);
+    return state.tab === MINE ? loadMine() : loadTab();
+  },
+  // --- cue sheets ---
+  "cue-scope": function (p) {
+    state.cueScope = p && p.value === "song" ? "song" : "all";
+    state.error = null;
+    return loadTab();
   },
   import: function (p) {
     return importItem(rowId(p), false);
   },
   update: function (p) {
     return importItem(rowId(p), true);
-  },
-  page: function (p) {
-    var id = rowId(p);
-    if (state.tab === "mine") {
-      var item = state.published[id];
-      return item ? api.network.openUrl(item.url) : Promise.resolve();
-    }
-    return api.network.openUrl(pageFor(id));
   },
   publish: function (p) {
     var row = localByKey(rowId(p));
@@ -935,7 +1096,11 @@ var ACTIONS = {
     return ACTIONS.publish(p);
   },
   unpublish: function (p) {
-    return unpublish(rowId(p));
+    return unpublishSheet(rowId(p));
+  },
+  "sheet-page": function (p) {
+    var item = sharedSheet(rowId(p));
+    return item ? api.network.openUrl(item.url) : Promise.resolve();
   },
   "confirm-import": function (p) {
     state.confirm = null;
@@ -951,6 +1116,11 @@ var ACTIONS = {
     state.confirm = null;
     render();
   },
+  // --- servers ---
+  "add-server": function (p) {
+    return addServer(rowId(p));
+  },
+  // --- account ---
   "sign-in": function () {
     return signIn();
   },
@@ -989,8 +1159,7 @@ function activate(pluginApi) {
   api.contextMenu.onAction("find-cues", function (target) {
     if (!target || !target.title) return;
     api.ui.navigateToView(VIEW);
-    state.tab = "song";
-    return loadSong({ title: target.title, artist: target.artistName || null });
+    return showSong({ title: target.title, artist: target.artistName || null });
   });
   api.contextMenu.onAction("publish-cues", function (target) {
     if (!target || !target.title) return;
@@ -998,25 +1167,33 @@ function activate(pluginApi) {
   });
   api.network.onDeepLink(onDeepLink);
 
-  var restored = Promise.all([api.storage.get("session"), api.storage.get("imports")]).then(function (vals) {
+  var restored = Promise.all([api.storage.get("session"), api.storage.get("imports"), api.storage.get("modules")]).then(function (vals) {
     var session = vals[0];
     if (session && session.token) {
       state.token = session.token;
       state.user = session.user || null;
     }
     state.imports = vals[1] || {};
+    var cached = validModules(vals[2]);
+    if (cached.length) {
+      state.modules = cached;
+      state.tab = cached[0].kind;
+    }
   });
   restored
     .catch(function (e) {
-      api.log("error", "Couldn't restore the server session: " + errorText(e));
+      api.log("error", "Couldn't restore the plugin's state: " + errorText(e));
     })
     .then(function () {
       render();
-      // Fill Browse shortly after launch rather than inside it: activation
-      // runs before the app is idle, and the view may never be opened.
+      // Fill the first tab shortly after launch rather than inside it:
+      // activation runs before the app is idle, and the view may never open.
       firstLoadTimer = setTimeout(function () {
         firstLoadTimer = null;
-        if (api && !state.results) loadBrowse(0);
+        if (!api) return;
+        loadModules().then(function () {
+          if (api && state.tab !== MINE) loadTab();
+        });
       }, FIRST_LOAD_DELAY_MS);
     });
   return restored;
@@ -1036,9 +1213,14 @@ return {
   _base64url: base64url,
   _parseLink: parseLink,
   _importAuthor: importAuthor,
-  _itemRow: itemRow,
+  _cardRow: function (m, item) {
+    return cardRow(m, item);
+  },
   _localRow: localRow,
-  _serverRow: serverRow,
+  _builtinModules: BUILTIN_MODULES,
+  _loadModules: function () {
+    return loadModules();
+  },
   _state: function () {
     return state;
   },
