@@ -1,7 +1,7 @@
 {
   "id": "community",
   "name": "Viboplr Community",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": "Viboplr",
   "description": "Share your Now Playing cue sheets, your synced lyrics and your playlists (as mixtapes) on Viboplr Community, and play or import what other people made. Signed-in members can also add the Subsonic / Navidrome servers their owners opened to the community. Sign in with GitHub to publish or to see shared servers; browsing, playing and importing everything else needs no account.",
   "minAppVersion": "1.0.93",

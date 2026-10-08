@@ -1,4 +1,4 @@
-## Unreleased
+## 0.4.0
 
 - The **Servers** tab is now **Subsonic servers**, so it says what kind of server it lists.
 - **Subsonic servers are for signed-in members only.** Signed out, the tab asks you to sign in with GitHub; signing out takes the listing off the screen. Cue sheets, synced lyrics and mixtapes still need no account.
