@@ -8,6 +8,7 @@ This plugin is the Viboplr client for [Viboplr Community](https://community.vibo
 - **Sign in with GitHub** opens your browser. The hub hands a one-time code back through `viboplr://plugin/community/auth`, and the plugin trades it for a revocable hub token using PKCE.
   - The verifier never leaves the plugin.
   - The GitHub token never reaches the app.
+- **Servers** lists the Subsonic / Navidrome servers on Viboplr Community (the old servers.viboplr.com directory). **Add** passes the listing, login included, to `api.collections.requestAdd`, which opens the app's own Add Server dialog already filled in. The user confirms there; the plugin never creates a collection itself. Listing a server happens on the website.
 - **Share links** of the form `viboplr://plugin/community/open?id=…` (the website's *Open in Viboplr* button) open the sheet, ready to import.
 
 It needs Viboplr **1.0.93+**, the first release with the `api.cues` plugin API. It runs on the worker runtime with these permissions:

@@ -243,3 +243,48 @@ test("a share link opens the song and asks to import", async () => {
   assert.equal(nodes(view, "tabs")[0].activeTab, "song");
   assert.equal(nodes(view, "confirm")[0].confirmAction, "confirm-import");
 });
+
+const SERVER_ITEM = {
+  id: "srv1",
+  kind: "subsonic_server",
+  title: "Jazz box",
+  address: "https://music.example.com",
+  host: "music.example.com",
+  tags: ["jazz", "flac"],
+  importCount: 2,
+  publisher: { login: "alice" },
+  url: "https://community.viboplr.com/c/srv1",
+};
+
+test("the Servers tab lists servers and Add opens the app's own dialog with the login", async () => {
+  const counted = [];
+  const { host } = await setup((u) => {
+    if (u.pathname === "/v1/items/search" && u.searchParams.get("kind") === "subsonic_server") {
+      return { body: { items: [SERVER_ITEM], hasMore: false } };
+    }
+    if (u.pathname === "/v1/items/srv1") {
+      return { body: { item: { ...SERVER_ITEM, payload: { url: "https://music.example.com", username: "guest", password: "g&t" } } } };
+    }
+    if (u.pathname === "/v1/items/srv1/imported") counted.push(1);
+    return { status: 204 };
+  });
+  await host.actions.tab({ tabId: "servers" });
+  const list = nodes(host.lastView(), "track-row-list")[0];
+  assert.equal(list.items[0].title, "Jazz box");
+  assert.match(list.items[0].subtitle, /music\.example\.com · jazz, flac · @alice · 2 adds/);
+
+  await host.actions["add-server"]({ itemId: "srv1" });
+  await flush();
+  assert.deepEqual(host.addRequests, [
+    { kind: "subsonic", name: "Jazz box", url: "https://music.example.com", username: "guest", password: "g&t" },
+  ]);
+  assert.equal(counted.length, 1);
+});
+
+test("on an app without requestAdd, Add opens the server's page instead", async () => {
+  const { host } = await setup(() => ({ status: 204 }));
+  delete host.api.collections.requestAdd;
+  await host.actions["add-server"]({ itemId: "srv1" });
+  assert.deepEqual(host.opened, ["https://community.viboplr.com/c/srv1"]);
+  assert.equal(host.addRequests.length, 0);
+});

@@ -17,6 +17,7 @@ function makeHost({ route, current = null } = {}) {
     storage: new Map(),
     cues: new Map(),
     navigated: [],
+    addRequests: [],
   };
   const key = (title, artist) =>
     `track:${String(artist || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")}:${String(title).toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")}`;
@@ -72,6 +73,11 @@ function makeHost({ route, current = null } = {}) {
       delete: async (title, artist) => host.cues.delete(key(title, artist)),
     },
     playback: { getCurrentTrack: () => current },
+    collections: {
+      requestAdd: async (source) => {
+        host.addRequests.push(source);
+      },
+    },
     ui: {
       setViewData: (id, data) => host.views.push({ id, data }),
       setViewHeader: (id, header) => host.headers.push({ id, header }),

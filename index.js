@@ -1,5 +1,6 @@
-// viboplr-community-plugin — Viboplr Community client: share Now Playing cue sheets and import
-// ones other people made.
+// viboplr-community-plugin — Viboplr Community client: share Now Playing cue
+// sheets and import ones other people made, and add the Subsonic / Navidrome
+// servers their owners opened to everyone.
 //
 // Design notes:
 //  - THE SERVER OWNS ACCOUNTS, THE APP OWNS SHEETS. Sign-in happens in the
@@ -15,6 +16,10 @@
 //    the mapping song → community item (+ the local updatedAt at import) is kept in
 //    this plugin's storage. That is what lets "My sheets" tell an untouched
 //    import (not ours to republish) from one the user has since changed.
+//  - SERVERS GO THROUGH THE APP'S OWN DIALOG. "Add" hands the listing to
+//    api.collections.requestAdd, which opens the same prefilled Add Server
+//    dialog a viboplr://add-collection link opens. The user confirms there;
+//    the plugin never creates a collection itself.
 //  - NOT READY IS A BANNER. A server that can't be reached is shown inside the
 //    view with a Retry, never as a toast (plugin view design guidelines).
 
@@ -44,6 +49,12 @@ function freshState() {
     query: "",
     sort: "recent",
     results: null,
+    // The Servers tab: its own search, sort and pages.
+    servers: null,
+    serverQuery: "",
+    serverSort: "recent",
+    serverPage: 0,
+    serverMore: false,
     page: 0,
     more: false,
     // The song the "This song" tab is about: { title, artist }.
@@ -436,6 +447,7 @@ function switchTab(tab) {
   if (tab === "browse" && !state.results) return loadBrowse(0);
   if (tab === "song") return loadSong(state.song || currentSong());
   if (tab === "mine") return loadMine();
+  if (tab === "servers" && !state.servers) return loadServers(0);
   render();
   return Promise.resolve();
 }
@@ -444,8 +456,47 @@ function switchTab(tab) {
 // Import / publish
 // ---------------------------------------------------------------------------
 
+function loadServers(page) {
+  page = page || 0;
+  return withLoading(function () {
+    return request(
+      "GET",
+      "/v1/items/search?" + queryString({ kind: "subsonic_server", q: state.serverQuery, sort: state.serverSort, page: page })
+    ).then(function (data) {
+      state.servers = page > 0 && state.servers ? state.servers.concat(data.items) : data.items;
+      state.serverPage = page;
+      state.serverMore = !!data.hasMore;
+    });
+  });
+}
+
+// Offer a listed server to the user through the app's own Add Server dialog.
+// The listing's login is only on the single read, so fetch it first.
+function addServer(id) {
+  if (!api.collections || typeof api.collections.requestAdd !== "function") {
+    // Older app: the website's Add button opens the same dialog by deep link.
+    return api.network.openUrl(SERVER + "/c/" + encodeURIComponent(id));
+  }
+  return request("GET", "/v1/items/" + encodeURIComponent(id))
+    .then(function (data) {
+      var item = data.item;
+      var p = item.payload || {};
+      return api.collections
+        .requestAdd({ kind: "subsonic", name: item.title, url: p.url, username: p.username || "", password: p.password || "" })
+        .then(function () {
+          request("POST", "/v1/items/" + encodeURIComponent(item.id) + "/imported").catch(function (e) {
+            api.log("warn", "Couldn't count the add: " + errorText(e));
+          });
+        });
+    })
+    .catch(function (e) {
+      if (e && e.status === 404) notify("That server isn't listed any more.");
+      else fail("Couldn't add that server", e);
+    });
+}
+
 function knownItem(id) {
-  var lists = [state.results || [], state.songItems || []];
+  var lists = [state.results || [], state.songItems || [], state.servers || []];
   for (var i = 0; i < lists.length; i++) {
     for (var j = 0; j < lists[i].length; j++) if (lists[i][j].id === id) return lists[i][j];
   }
@@ -659,6 +710,67 @@ function songNodes() {
   return nodes;
 }
 
+// One server listing → a row.
+function serverRow(item) {
+  var bits = [];
+  if (item.host) bits.push(item.host);
+  if (item.tags && item.tags.length) bits.push(item.tags.join(", "));
+  if (item.publisher && item.publisher.login) bits.push("@" + item.publisher.login);
+  if (item.importCount) bits.push(plural(item.importCount, "add", "adds"));
+  return { id: item.id, title: item.title, subtitle: bits.join(" · "), actions: ["add-server", "page"] };
+}
+
+function serverNodes() {
+  var nodes = [
+    {
+      type: "search-input",
+      placeholder: "Search name, description, address or tag",
+      action: "search-servers",
+      value: state.serverQuery,
+      submitOnly: true,
+      buttonLabel: "Search",
+    },
+    {
+      type: "layout",
+      direction: "horizontal",
+      children: [
+        {
+          type: "select",
+          label: "Sort",
+          action: "sort-servers",
+          value: state.serverSort,
+          options: [
+            { value: "recent", label: "Recent" },
+            { value: "popular", label: "Most added" },
+          ],
+        },
+        { type: "button", label: "List a server", action: "list-server", variant: "secondary" },
+      ],
+    },
+  ];
+  if (state.loading && !state.servers) nodes.push({ type: "loading", message: "Loading servers…" });
+  else if (state.servers && state.servers.length === 0) {
+    nodes.push({ type: "text", content: state.serverQuery ? "No servers match that search." : "No servers listed yet. Run one you're happy to share? List it." });
+  } else if (state.servers) {
+    nodes.push({ type: "text", content: "Servers their owners opened to everyone. Add puts one in your library, after you confirm.", className: "ds-muted" });
+    nodes.push({
+      type: "track-row-list",
+      selectable: true,
+      selectionMode: "single",
+      contextMenu: false,
+      actions: [
+        { id: "add-server", label: "Add" },
+        { id: "page", label: "Open page" },
+      ],
+      items: state.servers.map(serverRow),
+    });
+    if (state.serverMore) {
+      nodes.push({ type: "button", label: state.loading ? "Loading…" : "Load more", action: "more-servers", variant: "secondary", disabled: state.loading });
+    }
+  }
+  return nodes;
+}
+
 function mineNodes() {
   var nodes = [];
   if (!state.token) {
@@ -731,6 +843,7 @@ function render() {
         { id: "browse", label: "Browse" },
         { id: "song", label: "This song" },
         { id: "mine", label: "My sheets", count: state.local ? state.local.length : undefined },
+        { id: "servers", label: "Servers" },
       ],
     },
   ];
@@ -743,7 +856,8 @@ function render() {
   if (state.error) {
     children.push(banner("Couldn't reach Viboplr Community: " + state.error, "warning", [{ type: "button", label: "Try again", action: "retry", variant: "accent" }]));
   }
-  var body = state.tab === "song" ? songNodes() : state.tab === "mine" ? mineNodes() : browseNodes();
+  var body =
+    state.tab === "song" ? songNodes() : state.tab === "mine" ? mineNodes() : state.tab === "servers" ? serverNodes() : browseNodes();
   api.ui.setViewData(VIEW, { type: "layout", direction: "vertical", children: children.concat(body) }, { scrollKey: state.tab });
 }
 
@@ -768,6 +882,23 @@ var ACTIONS = {
     state.query = (p && p.query) || "";
     return loadBrowse(0);
   },
+  "search-servers": function (p) {
+    state.serverQuery = (p && p.query) || "";
+    return loadServers(0);
+  },
+  "sort-servers": function (p) {
+    state.serverSort = p && p.value === "popular" ? "popular" : "recent";
+    return loadServers(0);
+  },
+  "more-servers": function () {
+    return loadServers(state.serverPage + 1);
+  },
+  "add-server": function (p) {
+    return addServer(rowId(p));
+  },
+  "list-server": function () {
+    return api.network.openUrl(SERVER + "/servers/new");
+  },
   sort: function (p) {
     state.sort = p && p.value === "popular" ? "popular" : "recent";
     return loadBrowse(0);
@@ -779,6 +910,7 @@ var ACTIONS = {
     state.error = null;
     if (state.tab === "song") return loadSong(state.song || currentSong());
     if (state.tab === "mine") return loadMine();
+    if (state.tab === "servers") return loadServers(0);
     return loadBrowse(0);
   },
   import: function (p) {
@@ -906,6 +1038,7 @@ return {
   _importAuthor: importAuthor,
   _itemRow: itemRow,
   _localRow: localRow,
+  _serverRow: serverRow,
   _state: function () {
     return state;
   },
