@@ -1167,14 +1167,25 @@ function playlistRow(playlist, published) {
   return row;
 }
 
-// The playlists Mine offers: the user's own, with tracks. Liked/Disliked and
-// the mixes the app regenerates (`systemKind`, newer hosts) aren't "yours" in
-// that sense — though one already published stays, so it can be unpublished.
-// Right-click → Publish still works on any playlist; that's an explicit ask.
+// The app's own playlists: Liked / Disliked (seeded under these names, which
+// the app doesn't let anyone edit) and the mixes it regenerates, which all
+// carry a `recipe` in their metadata. The host doesn't say which is which, so
+// this is how the plugin tells.
+var SPECIAL_PLAYLIST_NAMES = ["Liked Tracks", "Disliked Tracks"];
+
+function isSpecialPlaylist(p) {
+  var m = p && p.metadata;
+  if (m && typeof m.recipe === "string") return true;
+  return !m && SPECIAL_PLAYLIST_NAMES.indexOf(p && p.name) !== -1;
+}
+
+// The playlists Mine offers: the user's own. Never a special one, and never an
+// empty one — unless it is already published, so it can still be unpublished.
 function minePlaylists() {
   return (state.playlists || []).filter(function (p) {
+    if (isSpecialPlaylist(p)) return false;
     if (!communityMeta(p) && sharedMixtape(p.name)) return true;
-    return !p.systemKind && (p.trackCount || 0) > 0;
+    return (p.trackCount || 0) > 0;
   });
 }
 

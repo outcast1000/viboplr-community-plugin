@@ -538,12 +538,16 @@ test("Save remembers where the mixtape came from, and a newer version replaces t
   assert.match(host.lastNotice().message, /Updated “Late night”/);
 });
 
-test("Mine offers your own playlists, not Liked/Disliked, the app's mixes or empty ones", async () => {
-  const { host } = await setup(mixRoute([]), { session: { token: "vcom_tok", user: { login: "alice" } } });
+test("Mine offers your own playlists, never Liked/Disliked or the app's mixes", async () => {
+  const posted = [];
+  const { host } = await setup(mixRoute(posted), { session: { token: "vcom_tok", user: { login: "alice" } } });
   await host.addPlaylist("Sunday", MIX_TRACKS);
-  await host.addPlaylist("Disliked Tracks", MIX_TRACKS, { systemKind: "disliked" });
-  await host.addPlaylist("Kyuss Mix", MIX_TRACKS, { systemKind: "auto:daily-mix:kyuss" });
+  await host.addPlaylist("Liked Tracks", MIX_TRACKS);
+  await host.addPlaylist("Disliked Tracks", MIX_TRACKS);
+  await host.addPlaylist("Kyuss Mix", MIX_TRACKS, { metadata: { recipe: "daily-mix", first_artist: "Kyuss" } });
   await host.addPlaylist("Nothing yet", []);
+  // Even one already published stays out: it's still not the user's own list.
+  posted.push({ title: "Kyuss Mix" });
   await host.actions.tab({ tabId: "mine" });
   const section = nodes(host.lastView(), "section").find((s) => s.title === "Your playlists");
   const rows = nodes({ children: section.children }, "track-row-list")[0].items;

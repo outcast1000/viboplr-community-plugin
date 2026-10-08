@@ -93,7 +93,6 @@ function makeHost({ route, current = null, queue = [] } = {}) {
           trackCount: p.tracks.length,
           description: p.description ?? null,
           metadata: p.metadata ? structuredClone(p.metadata) : null,
-          systemKind: p.systemKind ?? null,
         })),
       save: async (data) => {
         const id = nextPlaylistId++;

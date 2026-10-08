@@ -1,3 +1,7 @@
+## 0.2.1
+
+- **Mine** never lists Viboplr's own playlists — Liked Tracks, Disliked Tracks and the mixes it makes for you — on any version of Viboplr, not only 1.0.94+. That includes one you published earlier; unpublish it from its page on the website.
+
 ## 0.2.0
 
 - **Mixtapes:** a new tab for playlists people shared. **Play** one right away, or **Save to Playlists**. Each song is found in your library, on your servers or through your plugins, and anything you can't get is skipped. When the person who shared it updates it, the row offers **Update**.
