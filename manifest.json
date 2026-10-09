@@ -36,10 +36,22 @@
     { "api": "playlists.delete", "reason": "Replace a saved mixtape with its newer version, when you update it" },
     { "api": "lyrics.save", "reason": "Make synced lyrics you chose to import the song's lyrics" },
     { "api": "informationTypes.fetch", "reason": "Read a song's synced lyrics when you publish them, and look the song up again when you undo an import" },
-    { "api": "collections.requestAdd", "reason": "Open the app's Add Server dialog for a listed server — you confirm there" }
+    { "api": "collections.requestAdd", "reason": "Open the app's Add Server dialog for a listed server — you confirm there" },
+    { "api": "informationTypes.onFetch", "reason": "Say on a song's page how many cue sheets and synced lyrics are shared for it" },
+    { "api": "nowPlayingInfo.onFetch", "reason": "The same count in the mini player, only if you switch the item on" }
   ],
   "viewHeader": { "subtitle": "Cue sheets, synced lyrics, mixtapes and Subsonic servers shared by Viboplr users" },
   "contributes": {
+    "informationTypes": [
+      {
+        "id": "community_shared",
+        "name": "Shared on Community",
+        "description": "How many cue sheets and synced lyrics are shared for the song on Viboplr Community",
+        "entity": "track",
+        "displayKind": "title_line",
+        "ttl": 21600
+      }
+    ],
     "sidebarItems": [
       { "id": "community", "label": "Community", "icon": "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M5 7a4 4 0 1 0 8 0a4 4 0 1 0-8 0M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" }
     ],

@@ -1,3 +1,9 @@
+## Unreleased
+
+- **What's shared for a song:** a track's page now says how many cue sheets and synced lyrics people have shared for it, e.g. "2 cue sheets · 1 lyric sheet on Community". It's looked up only when you open the page.
+- The mini player can show the same line for the song that's playing: switch on **Shared on Community** in Settings → Playback → Now playing info. It's off by default, because with it on every song you play is looked up on community.viboplr.com.
+- Both need the Viboplr Community server with song pages (subjects). On an older server they show nothing.
+
 ## 0.5.1
 
 - New icon: two people replace the upload arrow, in the sidebar and in Extensions.

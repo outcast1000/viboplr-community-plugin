@@ -794,7 +794,11 @@ const JOGA_KEY = "track:bjork:joga";
 test("the plugin is not a lyrics provider", async () => {
   const p = loadPlugin();
   const manifest = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "manifest.json"), "utf8"));
-  assert.equal(manifest.contributes.informationTypes, undefined);
+  // Its one information type is the track page's "shared on Community" line.
+  assert.deepEqual(
+    manifest.contributes.informationTypes.map((t) => [t.id, t.entity, t.displayKind]),
+    [["community_shared", "track", "title_line"]]
+  );
   assert.ok(manifest.permissions.includes("lyrics:write"));
   assert.equal(p._provideLyrics, undefined);
 });
@@ -904,4 +908,65 @@ test("Find shared synced lyrics searches the tab for that song; a share link ask
   const confirm = nodes(host.lastView(), "confirm")[0];
   assert.equal(confirm.confirmAction, "confirm-import-lyrics");
   assert.match(confirm.message, /@bob's synced lyrics for “Jóga” by Björk/);
+});
+
+// ---------------------------------------------------------------------------
+// What's shared about a song
+// ---------------------------------------------------------------------------
+
+// Answers /v1/subjects/resolve with `counts` for Jóga by Björk, 404 otherwise.
+function subjectsRoute(counts, status = 200) {
+  return (url) => {
+    if (url.pathname !== "/v1/subjects/resolve") return undefined;
+    if (status !== 200) return { status, body: { error: "nope" } };
+    if (url.searchParams.get("title") !== "Jóga" || url.searchParams.get("artist") !== "Björk") return undefined;
+    return { body: { subject: { id: 7, kind: "track", name: "Jóga", counts } } };
+  };
+}
+const JOGA_ENTITY = { kind: "track", id: 0, name: "Jóga", artistName: "Björk" };
+const resolves = (host) => host.requests.filter((r) => r.url.includes("/v1/subjects/resolve"));
+
+test("the track page's header line counts what's shared for the song, asked once", async () => {
+  const { host } = await setup(subjectsRoute({ cue_sheet: 2, synced_lyrics: 1 }));
+  await flush();
+  assert.equal(resolves(host).length, 0, "nothing is asked until someone looks");
+
+  const got = await host.infoProviders.community_shared(JOGA_ENTITY);
+  assert.deepEqual(got, {
+    status: "ok",
+    value: { items: [{ value: 2, label: "cue sheets" }, { value: 1, label: "lyric sheet on Community" }] },
+  });
+  const asked = new URL(resolves(host)[0].url);
+  assert.deepEqual([...asked.searchParams], [["kind", "track"], ["title", "Jóga"], ["artist", "Björk"]]);
+  assert.equal(resolves(host)[0].init.headers.Authorization, undefined, "a public read, no token");
+
+  // The Now Playing item reads the same answer without asking again.
+  assert.deepEqual(await host.npHandlers.shared({ title: "Jóga", artist_name: "Björk" }), {
+    status: "ok",
+    text: "Community: 2 cue sheets · 1 lyric sheet",
+  });
+  assert.equal(resolves(host).length, 1);
+});
+
+test("a song with nothing shared shows nothing; a failing server is an error, not a count", async () => {
+  let { host } = await setup(subjectsRoute({}));
+  assert.deepEqual(await host.infoProviders.community_shared({ ...JOGA_ENTITY, name: "Other" }), { status: "not_found" });
+  assert.deepEqual(await host.infoProviders.community_shared(JOGA_ENTITY), { status: "not_found" }, "empty counts");
+  assert.deepEqual(await host.npHandlers.shared({ title: "Other", artist_name: "Björk" }), { status: "empty" });
+
+  ({ host } = await setup(subjectsRoute({}, 500)));
+  assert.deepEqual(await host.infoProviders.community_shared(JOGA_ENTITY), { status: "error" });
+  assert.deepEqual(await host.npHandlers.shared({ title: "Jóga", artist_name: "Björk" }), { status: "error" });
+});
+
+test("the Now Playing item is off until the user switches it on", async () => {
+  const { host } = await setup(subjectsRoute({}));
+  assert.deepEqual(host.npItems, [{ id: "shared", label: "Shared on Community", priority: 200, defaultEnabled: false }]);
+});
+
+test("counts name kinds the way their module does, in the server's order, and skip unknown ones", async () => {
+  const { plugin } = await setup(subjectsRoute({}));
+  assert.equal(plugin._countsText({ synced_lyrics: 3, cue_sheet: 1, mystery: 4 }), "Community: 1 cue sheet · 3 synced lyrics");
+  assert.equal(plugin._countsText({}), "");
+  assert.equal(plugin._countsTitleLine({ cue_sheet: 0 }), null);
 });

@@ -96,6 +96,8 @@ function freshState() {
     // songKey → { id, version, title, artist, by, url } for lyrics imported
     // from the community (the text itself is the app's, via api.lyrics.save).
     lyricsImports: {},
+    // songKey → { at, counts } — what's shared about a song, briefly cached.
+    songCounts: {},
   };
 }
 
@@ -875,6 +877,115 @@ function pageFor(id) {
   if (item) return item.url;
   var m = currentModule();
   return (m ? m.url : SERVER) + "/" + encodeURIComponent(id);
+}
+
+// ---------------------------------------------------------------------------
+// What's shared about a song
+// ---------------------------------------------------------------------------
+//
+// One call (GET /v1/subjects/resolve) says how many of each kind exist for a
+// song. It is asked only when someone looks: the track page's header line, or
+// the Now Playing item — which is off until the user switches it on, because
+// with it on every song played is named to the server.
+
+// "Nothing shared" is an answer too, so the cache holds empties.
+var SONG_COUNTS_TTL_MS = 10 * 60 * 1000;
+
+// { [kind]: n } for one song; {} when nothing is shared (404 — or a server
+// from before subjects, which answers 404 to the route itself).
+function songCounts(title, artist) {
+  var key = songKey(title, artist);
+  var hit = state.songCounts[key];
+  if (hit && Date.now() - hit.at < SONG_COUNTS_TTL_MS) return Promise.resolve(hit.counts);
+  return request("GET", "/v1/subjects/resolve?" + queryString({ kind: "track", title: title, artist: artist }))
+    .then(function (data) {
+      return (data && data.subject && data.subject.counts) || {};
+    })
+    .catch(function (e) {
+      if (e && e.status === 404) return {};
+      throw e;
+    })
+    .then(function (counts) {
+      state.songCounts[key] = { at: Date.now(), counts: counts };
+      return counts;
+    });
+}
+
+// The counts in the server's module order, named the way the module names
+// itself; kinds this build has never heard of are left out.
+function countParts(counts) {
+  var parts = [];
+  var kinds = state.modules.map(function (m) {
+    return m.kind;
+  });
+  Object.keys(counts || {}).forEach(function (k) {
+    if (kinds.indexOf(k) < 0) kinds.push(k);
+  });
+  kinds.forEach(function (kind) {
+    var n = Number(counts && counts[kind]);
+    var m = knownModule(kind);
+    if (!m || !(n > 0)) return;
+    parts.push({ n: n, noun: n === 1 ? m.singular || m.name : pluralOf(m) });
+  });
+  return parts;
+}
+
+// Now Playing: "Community: 2 cue sheets · 1 lyric sheet", or "" for none.
+function countsText(counts) {
+  var parts = countParts(counts);
+  if (!parts.length) return "";
+  return (
+    "Community: " +
+    parts
+      .map(function (p) {
+        return p.n + " " + p.noun;
+      })
+      .join(" · ")
+  );
+}
+
+// The track page's header line (`title_line`): "2 cue sheets · 1 lyric sheet
+// on Community", or null for none.
+function countsTitleLine(counts) {
+  var parts = countParts(counts);
+  if (!parts.length) return null;
+  return {
+    items: parts.map(function (p, i) {
+      return { value: p.n, label: p.noun + (i === parts.length - 1 ? " on Community" : "") };
+    }),
+  };
+}
+
+function registerSongCounts() {
+  if (api.informationTypes && typeof api.informationTypes.onFetch === "function") {
+    api.informationTypes.onFetch("community_shared", function (entity) {
+      if (!entity || !entity.name) return Promise.resolve({ status: "not_found" });
+      return songCounts(entity.name, entity.artistName || null)
+        .then(function (counts) {
+          var value = countsTitleLine(counts);
+          return value ? { status: "ok", value: value } : { status: "not_found" };
+        })
+        .catch(function (e) {
+          api.log("warn", "Couldn't read what's shared for a song: " + errorText(e));
+          return { status: "error" };
+        });
+    });
+  }
+  if (api.nowPlayingInfo && typeof api.nowPlayingInfo.registerItem === "function") {
+    api.nowPlayingInfo.registerItem({ id: "shared", label: "Shared on Community", priority: 200, defaultEnabled: false });
+    api.nowPlayingInfo.onFetch("shared", function (track) {
+      if (!track || !track.title) return Promise.resolve({ status: "empty" });
+      return songCounts(track.title, track.artist_name || null)
+        .then(function (counts) {
+          var text = countsText(counts);
+          return text ? { status: "ok", text: text } : { status: "empty" };
+        })
+        .catch(function (e) {
+          api.log("warn", "Couldn't read what's shared for the playing song: " + errorText(e));
+          return { status: "error" };
+        });
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2170,6 +2281,7 @@ function activate(pluginApi) {
     return publishPlaylist(target.playlistId, target.playlistName || "Untitled mixtape");
   });
   api.network.onDeepLink(onDeepLink);
+  registerSongCounts();
 
   var restored = Promise.all([
     api.storage.get("session"),
@@ -2230,6 +2342,8 @@ return {
   _localRow: localRow,
   _mixtapeTracks: mixtapeTracks,
   _playlistRow: playlistRow,
+  _countsText: countsText,
+  _countsTitleLine: countsTitleLine,
   _builtinModules: BUILTIN_MODULES,
   _loadModules: function () {
     return loadModules();

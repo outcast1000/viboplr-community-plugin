@@ -29,6 +29,11 @@ function makeHost({ route, current = null, queue = [], appVersion = "1.0.94" } =
     webLyrics: new Map(),
     infoFetches: [],
     lyricsSaves: [],
+    // typeId → handler, as api.informationTypes.onFetch registers them.
+    infoProviders: {},
+    // Now Playing info: registered items and their fetch handlers.
+    npItems: [],
+    npHandlers: {},
   };
   let nextPlaylistId = 1;
   const key = (title, artist) =>
@@ -131,6 +136,20 @@ function makeHost({ route, current = null, queue = [], appVersion = "1.0.94" } =
         if (web) host.lyricsCache.set(k, web);
         else host.lyricsCache.delete(k);
         return { typeId, status: web ? "ok" : "not_found", source: "fetch", value: web || null };
+      },
+      onFetch: (typeId, handler) => {
+        host.infoProviders[typeId] = handler;
+        return () => {};
+      },
+    },
+    nowPlayingInfo: {
+      registerItem: (descriptor) => {
+        host.npItems.push(descriptor);
+        return () => {};
+      },
+      onFetch: (id, handler) => {
+        host.npHandlers[id] = handler;
+        return () => {};
       },
     },
     lyrics: {
