@@ -1,3 +1,7 @@
+## 0.5.1
+
+- New icon: two people replace the upload arrow, in the sidebar and in Extensions.
+
 ## 0.5.0
 
 - **Sign in with a code**, a second way to sign in that works behind company proxies. **Sign in with GitHub** works as before: your browser hands the sign-in back to Viboplr. Behind a proxy that runs the browser remotely (for example Zscaler browser isolation), that handoff never arrives. Choose **Sign in with a code** instead, or **Use a code instead** while a sign-in is waiting. Viboplr shows a short code and opens community.viboplr.com. Sign in with GitHub there and confirm the code, and Viboplr signs you in a few seconds later. You can also enter the code on another device, such as your phone.

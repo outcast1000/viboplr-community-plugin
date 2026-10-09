@@ -1,14 +1,14 @@
 {
   "id": "community",
   "name": "Viboplr Community",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "author": "Viboplr",
   "description": "Share your Now Playing cue sheets, your synced lyrics and your playlists (as mixtapes) on Viboplr Community, and play or import what other people made. Signed-in members can also add the Subsonic / Navidrome servers their owners opened to the community. Sign in with GitHub to publish or to see shared servers; browsing, playing and importing everything else needs no account.",
   "minAppVersion": "1.0.93",
   "stability": "experimental",
   "homepage": "https://github.com/outcast1000/viboplr-community-plugin",
   "updateUrl": "https://github.com/outcast1000/viboplr-community-plugin/releases/latest/download/update.json",
-  "icon": "M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7M16 6l-4-4-4 4M12 2v13",
+  "icon": "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M5 7a4 4 0 1 0 8 0a4 4 0 1 0-8 0M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75",
   "runtime": "worker",
   "permissions": [
     "network:community.viboplr.com",
@@ -41,7 +41,7 @@
   "viewHeader": { "subtitle": "Cue sheets, synced lyrics, mixtapes and Subsonic servers shared by Viboplr users" },
   "contributes": {
     "sidebarItems": [
-      { "id": "community", "label": "Community", "icon": "M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7M16 6l-4-4-4 4M12 2v13" }
+      { "id": "community", "label": "Community", "icon": "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M5 7a4 4 0 1 0 8 0a4 4 0 1 0-8 0M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" }
     ],
     "contextMenuItems": [
       { "id": "find-cues", "label": "Find shared cue sheets", "targets": ["track"] },
