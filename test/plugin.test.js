@@ -493,8 +493,8 @@ test("tabs are Discover, one per non-music module, and You, which has a section 
   await host.actions.tab({ tabId: "you" });
   const sections = nodes(host.lastView(), "section");
   // Cue sheets and mixtapes bring their own sections (what's on this computer); servers use the generic one.
-  assert.deepEqual(sections.map((n) => n.title), ["While you listen", "Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your Subsonic servers"]);
-  const [, sheets, , , servers] = sections.map((n) => nodes({ children: n.children }, "track-row-list")[0]);
+  assert.deepEqual(sections.map((n) => n.title), ["While you listen", "Send from Viboplr", "Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your Subsonic servers"]);
+  const [, , sheets, , , servers] = sections.map((n) => nodes({ children: n.children }, "track-row-list")[0]);
   assert.equal(sheets.items[0].badge.label, "Published", "matched against your cue sheets online");
   assert.equal(servers.items[0].title, "Jazz box");
   assert.deepEqual(servers.items[0].actions, ["page", "edit"]);
@@ -552,7 +552,7 @@ test("a module the plugin has never heard of still gets a working tab and Mine s
 
   await host.actions.tab({ tabId: "you" });
   const titles = nodes(host.lastView(), "section").map((n) => n.title);
-  assert.deepEqual(titles, ["While you listen", "Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your Subsonic servers", "Your eq presets"]); // eq: no `plural`, so the lowercased name
+  assert.deepEqual(titles, ["While you listen", "Send from Viboplr", "Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your Subsonic servers", "Your eq presets"]); // eq: no `plural`, so the lowercased name
 });
 
 // The built-in module descriptions as the server would send them.

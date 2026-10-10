@@ -33,6 +33,9 @@ const SHEET_ITEM = {
 };
 const COMMENT = { id: 11, subjectId: 7, body: "that bridge", atSecs: 161, createdAt: 0, likes: 2, liked: false, author: { login: "bob", avatarUrl: null }, url: "https://community.viboplr.com/track/7#comment-11" };
 
+// What POST /v1/plays answers; a test sets it to simulate an outage.
+const playsServer = { status: 200 };
+
 // A community with Jóga (a cue sheet, a comment) and Björk (songs with something shared).
 function route(log = []) {
   return (u, init = {}) => {
@@ -48,6 +51,12 @@ function route(log = []) {
       if (init.method === "POST") return { status: 201, body: { comment: { ...COMMENT, id: 12, body: JSON.parse(init.body).body } } };
       return { body: { comments: u.searchParams.get("timed") ? [COMMENT] : [COMMENT], hasMore: false } };
     }
+    if (p === "/v1/plays") {
+      if (playsServer.status !== 200) return { status: playsServer.status, body: { error: "nope" } };
+      const n = JSON.parse(init.body).plays.length;
+      return { body: { accepted: n, skipped: 0 } };
+    }
+    if (p === "/v1/likes") return { body: { subject: { id: 7, kind: "track", url: "u" }, likes: 4, liked: init.method === "PUT" } };
     if (p === "/v1/subjects/7/like") return { body: { likes: init.method === "PUT" ? 4 : 3, liked: init.method === "PUT" } };
     if (p === "/v1/subjects/2/comments") return { body: { comments: [], hasMore: false } };
     if (p === "/v1/subjects/2/children") return { body: { tracks: [JOGA], albums: [] } };
@@ -175,6 +184,134 @@ test("rows show the picture Community matched, and only one Community serves", a
   assert.equal(plugin._feedRow({ type: "item", event: "shared", item: SHEET_ITEM, at: 0 }, 1).imageUrl, undefined);
 });
 
+test("likes made in the app reach Community only once switched on, as likes and un-likes", async () => {
+  const { host, log } = await setup({ session: SIGNED_IN });
+  const sent = () => log.filter(([, p]) => p === "/v1/likes").map(([m]) => m);
+  const like = (over) => host.likeChanged({ kind: "track", name: "Jóga", artistName: "Björk", albumTitle: "Homogenic", albumArtistName: "Björk", liked: 1, previous: 0, ...over });
+
+  // Off by default: nothing leaves the app.
+  await like();
+  await flush();
+  assert.deepEqual(sent(), []);
+
+  await host.actions.tab({ tabId: "you" });
+  const toggle = () => nodes(host.lastView(), "toggle").find((t) => t.action === "toggle-sync-likes");
+  assert.equal(toggle().checked, false);
+  await host.actions["toggle-sync-likes"]({ value: true });
+  assert.equal(toggle().checked, true);
+  assert.equal(host.storage.get("syncLikes"), true);
+
+  await like();
+  await like({ liked: 0, previous: 1 }); // un-like
+  await like({ liked: -1, previous: 1 }); // liked → disliked: the like goes
+  await like({ liked: -1, previous: 0 }); // a dislike of something never liked: nothing to say
+  await like({ kind: "tag", name: "jazz", artistName: null, albumTitle: null, albumArtistName: null }); // not a subject
+  await like({ kind: "album", name: "Post", artistName: null }); // an album without its artist can't be keyed
+  await flush(10);
+  assert.deepEqual(sent(), ["PUT", "DELETE", "DELETE"]);
+  const body = JSON.parse(host.requests.find((r) => r.url.endsWith("/v1/likes")).init.body);
+  assert.deepEqual(body, { kind: "track", name: "Jóga", artistName: "Björk", albumName: "Homogenic", albumArtistName: "Björk" });
+});
+
+const PLAYED = { key: "q:1", title: "Jóga", artist_name: "Björk", album_title: "Homogenic", album_artist_name: "Björk" };
+
+test("plays are scrobbled only once switched on, with when they started", async () => {
+  const { host } = await setup({ session: SIGNED_IN });
+  const posts = () => host.requests.filter((r) => r.url.endsWith("/v1/plays")).map((r) => JSON.parse(r.init.body).plays);
+  host.position = 152;
+  await host.trackScrobbled(PLAYED);
+  await flush();
+  assert.deepEqual(posts(), [], "off by default");
+
+  await host.actions.tab({ tabId: "you" });
+  await host.actions["toggle-scrobble"]({ value: true });
+  assert.equal(host.storage.get("scrobble"), true);
+  const before = Math.floor(Date.now() / 1000);
+  await host.trackScrobbled(PLAYED);
+  await flush(10);
+  const [[sent]] = posts();
+  assert.deepEqual({ ...sent, playedAt: 0 }, { title: "Jóga", artistName: "Björk", albumName: "Homogenic", albumArtistName: "Björk", playedAt: 0 });
+  assert.ok(Math.abs(sent.playedAt - (before - 152)) <= 1, "the play started 152 s before the threshold");
+  assert.deepEqual(host.storage.get("playQueue"), [], "sent plays leave the queue");
+  assert.match(JSON.stringify(nodes(host.lastView(), "text")), /All your plays are sent/);
+  // A video or a song with no artist isn't a scrobble the server can take.
+  await host.trackScrobbled({ ...PLAYED, artist_name: null });
+  await flush();
+  assert.equal(posts().length, 1);
+});
+
+test("plays made while Community is unreachable wait, survive a restart, and go later", async () => {
+  playsServer.status = 503;
+  try {
+    const { host, plugin } = await setup({ session: SIGNED_IN });
+    host.storage.set("scrobble", true);
+    await plugin.deactivate();
+    await plugin.activate(host.api);
+    await host.trackScrobbled(PLAYED);
+    await host.trackScrobbled({ ...PLAYED, title: "Hunter" });
+    await flush(10);
+    assert.equal(host.storage.get("playQueue").length, 2, "kept for later");
+    await host.actions.tab({ tabId: "you" });
+    assert.match(JSON.stringify(nodes(host.lastView(), "text")), /2 plays waiting to be sent/);
+
+    // The app restarts with the server back: the queue goes out on its own.
+    playsServer.status = 200;
+    await plugin.deactivate();
+    const sentBefore = host.requests.filter((r) => r.url.endsWith("/v1/plays")).length;
+    await plugin.activate(host.api);
+    await flush(10);
+    const posts = host.requests.filter((r) => r.url.endsWith("/v1/plays"));
+    assert.equal(posts.length, sentBefore + 1, "one batch");
+    assert.deepEqual(JSON.parse(posts.at(-1).init.body).plays.map((p) => p.title), ["Jóga", "Hunter"]);
+    assert.deepEqual(host.storage.get("playQueue"), []);
+  } finally {
+    playsServer.status = 200;
+  }
+});
+
+test("plays the server refuses, too old to send, or left when switched off are dropped", async () => {
+  const { host, plugin } = await setup({ session: SIGNED_IN });
+  const old = Math.floor(Date.now() / 1000) - 15 * 86400;
+  host.storage.set("scrobble", true);
+  host.storage.set("playQueue", [{ title: "Old", artistName: "Björk", playedAt: old }]);
+  playsServer.status = 400;
+  try {
+    await plugin.deactivate();
+    await plugin.activate(host.api);
+    await flush(10);
+    assert.ok(!host.requests.some((r) => r.url.endsWith("/v1/plays")), "a two-week-old play isn't even sent");
+    assert.deepEqual(host.storage.get("playQueue"), []);
+    await host.trackScrobbled(PLAYED);
+    await flush(10);
+    assert.deepEqual(host.storage.get("playQueue"), [], "a refused batch is dropped, not retried forever");
+  } finally {
+    playsServer.status = 200;
+  }
+  playsServer.status = 503;
+  try {
+    await host.trackScrobbled(PLAYED);
+    await flush(10);
+    assert.equal(host.storage.get("playQueue").length, 1);
+    await host.actions.tab({ tabId: "you" });
+    await host.actions["toggle-scrobble"]({ value: false });
+    assert.deepEqual(host.storage.get("playQueue"), [], "switching off drops what was waiting");
+  } finally {
+    playsServer.status = 200;
+  }
+});
+
+test("signed out, likes stay in the app and the switch can't be turned on", async () => {
+  const { host, log } = await setup();
+  host.storage.set("syncLikes", true);
+  await host.actions.tab({ tabId: "you" });
+  await host.actions["toggle-sync-likes"]({ value: true });
+  const toggle = nodes(host.lastView(), "toggle").find((t) => t.action === "toggle-sync-likes");
+  assert.equal(toggle.disabled, true);
+  await host.likeChanged({ kind: "artist", name: "Björk", artistName: null, albumTitle: null, albumArtistName: null, liked: 1, previous: 0 });
+  await flush();
+  assert.ok(!log.some(([, p]) => p === "/v1/likes"));
+});
+
 test("an artist's tab lists its songs with something shared, and has no image gallery", async () => {
   const { host, log } = await setup();
   const tree = (await tab(host, "artist", { kind: "artist", name: "Björk" })).value;
@@ -240,6 +377,13 @@ test("the header line leads with the likes", async () => {
   ]);
   assert.deepEqual(p._countsTitleLine({ _likes: 5 }).items, [{ value: "♥ 5", label: "on Community" }]);
   assert.equal(p._countsTitleLine({}), null);
+  // Plays come right after the likes: "♥ 5 · 1,204 plays · 2 cue sheets on Community".
+  assert.deepEqual(p._countsTitleLine({ cue_sheet: 2, _likes: 5, _plays: 1204 }).items, [
+    { value: "♥ 5", label: "" },
+    { value: 1204, label: "plays" },
+    { value: 2, label: "cue sheets on Community" },
+  ]);
+  assert.deepEqual(p._countsTitleLine({ _plays: 1 }).items, [{ value: 1, label: "play on Community" }]);
 });
 
 // The host draws a tab from its own cache while that is fresh — across a

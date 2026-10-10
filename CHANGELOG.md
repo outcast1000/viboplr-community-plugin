@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.2.0
+- **Scrobbling, like Last.fm** (You → *Send from Viboplr* → *Send my plays to Community*, off until you switch it on): each song you play past halfway or four minutes — the same rule the app uses for its own history — is sent to Viboplr Community. Your list of plays is only yours (Community → You → Plays, where you can also delete it all); everyone else sees only totals: plays and listeners on song, album and artist pages, and the charts. Plays made offline or while Community is down wait and go later, at their own time; plays older than two weeks are dropped. Songs you already played aren't sent.
+- **Send your likes to Community** (You → *Send from Viboplr*, off until you switch it on, signed in only): from then on, a song, album or artist you like anywhere in Viboplr is liked on Viboplr Community too, and un-liking or disliking it takes that like away. Likes you already have aren't sent. Something nobody has shared about yet gets its Community page from your like. Needs a Viboplr that reports likes to plugins; older ones say so in the same place.
+
 ## v1.1.0
 - **Artist photos and album covers** on Discover's search results, the feed, and the album / song lists on a Community tab: the picture Viboplr Community matched for it (a song shows its album's cover, else its artist's photo). Where Community has none, a row keeps the art Viboplr already has on disk for that name.
 

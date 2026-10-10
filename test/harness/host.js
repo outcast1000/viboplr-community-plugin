@@ -107,12 +107,22 @@ function makeHost({ route, current = null, queue = [], appVersion = "1.0.94" } =
         host.trackStarted = handler;
         return () => {};
       },
+      // host.trackScrobbled(track): the app counting a play.
+      onTrackScrobbled: (handler) => {
+        host.trackScrobbled = handler;
+        return () => {};
+      },
       getCurrentTrack: () => host.current,
       getQueue: () => ({ tracks: host.queue, index: 0 }),
       playTracks: (tracks, startIndex, context) => host.plays.push({ tracks, startIndex, context }),
     },
     library: {
       ftsTracks: async () => structuredClone(host.libraryTracks),
+      // The test plays the app: host.likeChanged(change) is a like the user made.
+      onLikeChanged: (handler) => {
+        host.likeChanged = handler;
+        return () => {};
+      },
     },
     playlists: {
       list: async () =>

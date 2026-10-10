@@ -97,6 +97,13 @@ function freshState() {
     ticks: false,
     // The track whose ticks were last asked for, so it's asked once.
     ticksKey: null,
+    // Send the likes made in the app to Community. Off by default: a like on
+    // Community is public, and it names the song to the server.
+    syncLikes: false,
+    // Scrobbling: send the songs played to Community. Off by default. The
+    // queue holds plays not yet sent, saved across restarts.
+    scrobble: false,
+    playQueue: [],
     // Comments posted from a tab this session: the comment box's stateKey.
     commentsPosted: 0,
     // Per module: { query, sort, page, items, more }.
@@ -755,7 +762,7 @@ function completeSignIn(data) {
       render();
       // The open tab may be one only members can see; load it now.
       var m = currentModule();
-      return Promise.all([loadShared(), m && m.membersOnly ? loadTab() : null, redrawTabs(true)]);
+      return Promise.all([loadShared(), m && m.membersOnly ? loadTab() : null, redrawTabs(true), sendPlays()]);
     })
     .catch(function (e) {
       render();
@@ -975,7 +982,7 @@ function forgetSubject(kind, name, artist) {
 // { [kind]: n } for one song; {} when nothing is shared.
 function songCounts(title, artist) {
   return resolveSubject("track", title, artist).then(function (s) {
-    return s ? Object.assign({}, s.counts || {}, s.likes ? { _likes: s.likes } : {}) : {};
+    return s ? Object.assign({}, s.counts || {}, s.likes ? { _likes: s.likes } : {}, s.plays ? { _plays: s.plays } : {}) : {};
   });
 }
 
@@ -1017,10 +1024,12 @@ function countsText(counts) {
 function countsTitleLine(counts) {
   var parts = countParts(counts);
   var likes = Number(counts && counts._likes) || 0;
-  if (!parts.length && !likes) return null;
+  var plays = Number(counts && counts._plays) || 0;
+  if (!parts.length && !likes && !plays) return null;
   var items = parts.map(function (p) {
     return { value: p.n, label: p.noun };
   });
+  if (plays) items.unshift({ value: plays, label: plays === 1 ? "play" : "plays" });
   if (likes) items.unshift({ value: "♥ " + likes, label: "" });
   items[items.length - 1].label += (items[items.length - 1].label ? " " : "") + "on Community";
   return { items: items };
@@ -2687,6 +2696,229 @@ function setTicks(on) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Your likes: the app's likes, sent to Community
+// ---------------------------------------------------------------------------
+//
+// One direction only (owner decision): a like, dislike or un-like made in the
+// app (api.library.onLikeChanged) becomes a like or un-like here, from the
+// moment the switch is on — nothing already liked is sent. Community has no
+// dislike, so disliking something you had liked takes the Community like
+// away. A like on something nothing was shared about creates its subject on
+// the server (PUT /v1/likes). Tags aren't Community subjects.
+
+var LIKE_KINDS = { track: true, album: true, artist: true };
+
+function canSyncLikes() {
+  return !!(api.library && typeof api.library.onLikeChanged === "function");
+}
+
+// What a change becomes on Community: "PUT" (a like), "DELETE" (a like that
+// was undone, or turned into a dislike), or null (nothing to send — a dislike
+// of something never liked, a tag, a repeat).
+function likeMethod(change) {
+  if (!change || !LIKE_KINDS[change.kind] || !change.name) return null;
+  if (change.kind === "album" && !change.artistName) return null;
+  if (change.liked === 1 && change.previous !== 1) return "PUT";
+  if (change.liked !== 1 && change.previous === 1) return "DELETE";
+  return null;
+}
+
+// Likes go out one at a time, in the order they were made, so a quick like
+// then un-like can't land the other way round.
+var likeChain = Promise.resolve();
+
+function onLikeChanged(change) {
+  if (!state || !state.syncLikes || !state.token) return;
+  var method = likeMethod(change);
+  if (!method) return;
+  var body = { kind: change.kind, name: change.name, artistName: change.artistName || null };
+  if (change.kind === "track") {
+    body.albumName = change.albumTitle || null;
+    body.albumArtistName = change.albumArtistName || null;
+  }
+  var entity = { kind: change.kind, name: change.name, artistName: change.artistName || null, albumTitle: change.albumTitle || null };
+  likeChain = likeChain
+    .then(function () {
+      if (!api || !state.syncLikes || !state.token) return;
+      return request(method, "/v1/likes", body, true).then(function () {
+        forgetSubject(entity.kind, entity.name, entity.artistName);
+        // A Community tab showing it would show the old count until its TTL.
+        if (state.tabs[tabKey(entity)]) return refreshTab(entity, true);
+      });
+    })
+    .catch(function (e) {
+      // Background work the user didn't wait on: the log, not a toast.
+      api.log("warn", "Couldn't send a like to Viboplr Community (" + change.kind + " " + JSON.stringify(change.name) + "): " + errorText(e));
+    });
+  return likeChain;
+}
+
+// ---------------------------------------------------------------------------
+// Your plays: a scrobbler, like Last.fm's
+// ---------------------------------------------------------------------------
+//
+// With the switch on, every song the app counts as played (its scrobble
+// threshold: half the song or four minutes, never under 30 seconds) is sent
+// to POST /v1/plays. Community shows only totals — a song's plays and
+// listeners, the charts; a member's own list is theirs alone. Plays wait in a
+// queue saved to plugin storage until they're sent, so a play made offline
+// (or signed out, or while the server is down) goes later, at its own time.
+// From the moment it's switched on: nothing already played is sent.
+
+var PLAY_BATCH = 50; // the server's per-request maximum
+var PLAY_QUEUE_MAX = 2000; // past this, the oldest wait in vain
+var PLAY_MAX_AGE_SECS = 14 * 24 * 60 * 60; // the server refuses older plays
+var PLAY_RETRY_MS = 5 * 60 * 1000;
+var playRetryTimer = null;
+var playSending = null;
+
+function canScrobble() {
+  return !!(api.playback && typeof api.playback.onTrackScrobbled === "function");
+}
+
+function onTrackScrobbled(track) {
+  if (!state || !state.scrobble || !track || !track.title || !track.artist_name) return;
+  var nowSecs = Math.floor(Date.now() / 1000);
+  var pos = typeof api.playback.getPosition === "function" ? Number(api.playback.getPosition()) : 0;
+  state.playQueue.push({
+    title: track.title,
+    artistName: track.artist_name,
+    albumName: track.album_title || null,
+    albumArtistName: track.album_artist_name || null,
+    // When the play started: the event comes at the threshold, mid-song.
+    playedAt: nowSecs - (isFinite(pos) && pos > 0 ? Math.floor(pos) : 0),
+  });
+  if (state.playQueue.length > PLAY_QUEUE_MAX) state.playQueue.splice(0, state.playQueue.length - PLAY_QUEUE_MAX);
+  return savePlayQueue().then(sendPlays);
+}
+
+function savePlayQueue() {
+  return api.storage.set("playQueue", state.playQueue).catch(function (e) {
+    api.log("error", "Couldn't save the plays waiting to be sent: " + errorText(e));
+  });
+}
+
+function retryPlaysLater() {
+  if (playRetryTimer) return;
+  playRetryTimer = setTimeout(function () {
+    playRetryTimer = null;
+    if (api) sendPlays();
+  }, PLAY_RETRY_MS);
+}
+
+// Send what's queued, a batch at a time; one send at a time. A batch the
+// server took (or refused as malformed) leaves the queue; one that couldn't be
+// sent stays, and is tried again in a few minutes or with the next play.
+function sendPlays() {
+  if (playSending) return playSending;
+  if (!state.scrobble || !state.token || !state.playQueue.length) return Promise.resolve();
+  var oldest = Math.floor(Date.now() / 1000) - PLAY_MAX_AGE_SECS;
+  var fresh = state.playQueue.filter(function (p) {
+    return p.playedAt >= oldest;
+  });
+  if (fresh.length !== state.playQueue.length) {
+    api.log("info", "Dropped " + (state.playQueue.length - fresh.length) + " plays older than two weeks: Viboplr Community no longer takes them.");
+    state.playQueue = fresh;
+  }
+  var batch = state.playQueue.slice(0, PLAY_BATCH);
+  if (!batch.length) return savePlayQueue();
+  playSending = request("POST", "/v1/plays", { plays: batch }, true)
+    .then(
+      function () {
+        return true;
+      },
+      function (e) {
+        // 400: nothing in it will ever be taken. Anything else is worth a retry.
+        if (e.status === 400) {
+          api.log("warn", "Viboplr Community refused " + batch.length + " plays, dropping them: " + errorText(e));
+          return true;
+        }
+        if (e.status !== 401) api.log("warn", "Couldn't send plays to Viboplr Community, trying again later: " + errorText(e));
+        retryPlaysLater();
+        return false;
+      }
+    )
+    .then(function (done) {
+      playSending = null;
+      if (!done || !api) return;
+      state.playQueue = state.playQueue.slice(batch.length);
+      return savePlayQueue().then(function () {
+        if (state.tab === MINE) render();
+        if (state.playQueue.length) return sendPlays();
+      });
+    });
+  return playSending;
+}
+
+function setScrobble(on) {
+  state.scrobble = !!on;
+  // Off means stop sending: what was still waiting is dropped with it, and
+  // so is a pending retry.
+  if (!state.scrobble) {
+    state.playQueue = [];
+    if (playRetryTimer) clearTimeout(playRetryTimer);
+    playRetryTimer = null;
+  }
+  return Promise.all([api.storage.set("scrobble", state.scrobble), savePlayQueue()]).then(function () {
+    render();
+  });
+}
+
+function scrobbleNodes() {
+  if (!canScrobble()) {
+    return [{ type: "text", className: "ds-muted", content: "Sending your plays needs a newer Viboplr." }];
+  }
+  var nodes = [
+    {
+      type: "settings-row",
+      label: "Send my plays to Community",
+      description:
+        "Like a Last.fm scrobbler: each song you play past halfway (or four minutes) is sent to Viboplr Community. Your list of plays is only yours to see; Community shows only totals, like how often a song was played and by how many people. Songs you already played aren't sent.",
+      control: { type: "toggle", label: "", action: "toggle-scrobble", checked: state.scrobble && !!state.token, disabled: !state.token },
+    },
+  ];
+  if (!state.token) {
+    nodes.push({ type: "text", className: "ds-muted", content: "Sign in to send your plays." });
+    return nodes;
+  }
+  if (state.scrobble) {
+    var waiting = state.playQueue.length;
+    nodes.push({
+      type: "layout",
+      direction: "horizontal",
+      children: [
+        { type: "text", className: "ds-muted", content: waiting ? plural(waiting, "play", "plays") + " waiting to be sent." : "All your plays are sent." },
+        { type: "button", label: "See your plays", action: "open-my-plays", variant: "secondary" },
+      ],
+    });
+  }
+  return nodes;
+}
+
+function setSyncLikes(on) {
+  state.syncLikes = !!on;
+  return api.storage.set("syncLikes", state.syncLikes).then(function () {
+    render();
+  });
+}
+
+function likeSyncNodes() {
+  if (!canSyncLikes()) {
+    return [{ type: "text", className: "ds-muted", content: "Sending your likes needs a newer Viboplr." }];
+  }
+  var row = {
+    type: "settings-row",
+    label: "Send my likes to Community",
+    description:
+      "From now on, a song, album or artist you like in Viboplr is liked on Viboplr Community too, and un-liking or disliking it takes that like away. Likes there are public. Likes you already have aren't sent.",
+    control: { type: "toggle", label: "", action: "toggle-sync-likes", checked: state.syncLikes && !!state.token, disabled: !state.token },
+  };
+  var nodes = [row];
+  if (!state.token) nodes.push({ type: "text", className: "ds-muted", content: "Sign in to send your likes." });
+  return nodes;
+}
+
 // A comment was posted or deleted on this tab's song: redraw its ticks if it
 // is the one playing.
 function retick(entity) {
@@ -2816,6 +3048,7 @@ function mineNodes() {
     nodes.push(banner("Sign in with GitHub to share, and to see what you've shared.", "muted", [{ type: "button", label: "Sign in", action: "sign-in", variant: "accent" }]));
   }
   nodes.push({ type: "section", title: "While you listen", children: tickNodes() });
+  nodes.push({ type: "section", title: "Send from Viboplr", children: scrobbleNodes().concat(likeSyncNodes()) });
   if (state.loading && !state.local && !Object.keys(state.shared).length) {
     nodes.push({ type: "loading", message: "Reading what's yours…" });
     return nodes;
@@ -3033,6 +3266,17 @@ var ACTIONS = {
   "toggle-ticks": function (p) {
     return setTicks(p && p.value);
   },
+  "toggle-scrobble": function (p) {
+    if (!state.token) return Promise.resolve(render());
+    return setScrobble(p && p.value);
+  },
+  "open-my-plays": function () {
+    return api.network.openUrl(SERVER + "/me?tab=plays");
+  },
+  "toggle-sync-likes": function (p) {
+    if (!state.token) return Promise.resolve(render());
+    return setSyncLikes(p && p.value);
+  },
   "open-my-page": function () {
     return api.network.openUrl(SERVER + "/me");
   },
@@ -3211,6 +3455,8 @@ function activate(pluginApi) {
       loadTicks(track);
     });
   }
+  if (canSyncLikes()) api.library.onLikeChanged(onLikeChanged);
+  if (canScrobble()) api.playback.onTrackScrobbled(onTrackScrobbled);
 
   var restored = Promise.all([
     api.storage.get("session"),
@@ -3218,6 +3464,9 @@ function activate(pluginApi) {
     api.storage.get("modules"),
     api.storage.get("lyricsImports"),
     api.storage.get("ticks"),
+    api.storage.get("syncLikes"),
+    api.storage.get("scrobble"),
+    api.storage.get("playQueue"),
   ]).then(function (vals) {
     var session = vals[0];
     if (session && session.token) {
@@ -3229,11 +3478,16 @@ function activate(pluginApi) {
     if (cached.length) state.modules = cached;
     state.lyricsImports = vals[3] || {};
     state.ticks = vals[4] === true;
+    state.syncLikes = vals[5] === true;
+    state.scrobble = vals[6] === true;
+    state.playQueue = Array.isArray(vals[7]) ? vals[7] : [];
   });
   // The song already playing: its start event came before the setting was
   // read, or not at all (the plugin was enabled or updated mid-song).
   restored.then(function () {
     if (api) loadTicks(currentTrack());
+    // Plays left waiting by the last run (offline, or the app closed).
+    if (api) sendPlays();
   });
   restored
     .catch(function (e) {
@@ -3257,6 +3511,9 @@ function activate(pluginApi) {
 function deactivate() {
   if (firstLoadTimer) clearTimeout(firstLoadTimer);
   firstLoadTimer = null;
+  if (playRetryTimer) clearTimeout(playRetryTimer);
+  playRetryTimer = null;
+  playSending = null;
   if (state) stopSignIn();
   api = null;
 }
