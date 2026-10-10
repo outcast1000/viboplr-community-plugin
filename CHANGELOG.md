@@ -1,3 +1,8 @@
+# Changelog
+
+## v1.0.1
+- Releases are now signed with the Viboplr plugin-signing key, so Viboplr allows the permissions this plugin asks for without prompting. No functional changes.
+
 ## 1.0.0
 
 - **A Community tab on every song, album and artist page.** Everything people shared about it is right there: like it, import their cue sheets and synced lyrics (with the same Imported / Update badges), read and post comments. Albums show what's shared per track, artists their albums and songs. Importing synced lyrics there still asks first when the song has synced lyrics of its own, right in the tab.
