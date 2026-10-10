@@ -28,7 +28,10 @@ function makeHost({ route, current = null, queue = [], appVersion = "1.0.94" } =
     lyricsCache: new Map(),
     webLyrics: new Map(),
     infoFetches: [],
+    infoReads: [],
     lyricsSaves: [],
+    // name → handler, as api.assistant.onTool registers them.
+    tools: {},
     // typeId → handler, as api.informationTypes.onFetch registers them.
     infoProviders: {},
     // Now Playing info: registered items and their fetch handlers.
@@ -154,7 +157,19 @@ function makeHost({ route, current = null, queue = [], appVersion = "1.0.94" } =
           imagePath: null,
         })),
     },
+    assistant: {
+      onTool: (name, handler) => {
+        host.tools[name] = handler;
+        return () => {};
+      },
+    },
     informationTypes: {
+      // Cache only, any age — never walks the providers.
+      getValue: async (typeId, entity) => {
+        host.infoReads.push({ typeId, entity });
+        const k = key(entity.name, entity.artistName);
+        return host.lyricsCache.has(k) ? { typeId, status: "ok", value: host.lyricsCache.get(k), fetchedAt: 0 } : null;
+      },
       fetch: async (typeId, entity, opts = {}) => {
         host.infoFetches.push({ typeId, entity, opts });
         const k = key(entity.name, entity.artistName);

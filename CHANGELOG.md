@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.3.1
+- **Publishing synced lyrics no longer fetches them again.** Lyrics Viboplr already has are published as they are, at any age, instead of being looked up from the lyrics providers once more. For an AI assistant's `publish_lyrics`, the song is first matched to the library's own spelling (so "joga" finds *Jóga* by Björk, and the cached lyrics are found); a title shared by several artists asks for an `artistName` instead of guessing.
+
 ## v1.3.0
 - **An AI assistant can publish synced lyrics.** A new `publish_lyrics` assistant tool sends the synced lyrics Viboplr already has for a song to Viboplr Community, under your account, and reports back what happened (published or updated, with the page link). It needs Settings → AI control → *Plugin actions*, and you signed in to Community; it never takes lyrics from the assistant, only what Viboplr has, and says why when there are none, they're plain, or you're signed out.
 

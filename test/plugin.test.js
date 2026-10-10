@@ -899,6 +899,44 @@ test("publishing shares any synced lyrics the app has, from any source", async (
   assert.deepEqual(posted[0], { kind: "synced_lyrics", title: "Jóga", artistName: "Björk", albumName: "Homogenic", lrc: LRC, durationSecs: 305 });
 });
 
+test("the assistant's publish_lyrics tool reports the outcome and uses the library's spelling", async () => {
+  const posted = [];
+  const { host } = await setup(lyricsRoute(posted), { session: { token: "vcom_tok", user: { login: "alice" } } });
+  host.libraryTracks.push({ title: "Jóga", artist_name: "Björk", album_title: "Homogenic" });
+  const tool = host.tools.publish_lyrics;
+  assert.equal(typeof tool, "function");
+
+  await assert.rejects(async () => tool({}), /title is required/);
+  await assert.rejects(() => tool({ title: "joga" }), /no lyrics/i);
+  host.lyricsCache.set(JOGA_KEY, { text: "plain words", kind: "plain" });
+  await assert.rejects(() => tool({ title: "joga", artistName: "bjork" }), /only has plain lyrics/);
+  assert.equal(posted.length, 0);
+
+  // Sloppy spelling and no artist: the cache is read under the library's own.
+  host.lyricsCache.set(JOGA_KEY, { text: LRC, kind: "synced" });
+  host.infoFetches.length = 0;
+  host.infoReads.length = 0;
+  const out = await tool({ title: "joga" });
+  assert.equal(out.status, "published");
+  assert.equal(typeof out.url, "string");
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].title, "Jóga");
+  assert.equal(posted[0].artistName, "Björk");
+  assert.equal(posted[0].albumName, "Homogenic");
+  assert.ok(host.infoReads.length > 0 && host.infoReads.every((r) => r.entity.name === "Jóga" && r.entity.artistName === "Björk"));
+  // Lyrics the app already had are never fetched again.
+  assert.equal(host.infoFetches.length, 0);
+});
+
+test("publish_lyrics asks for an artist when a title matches several, and for sign-in when signed out", async () => {
+  const { host } = await setup(lyricsRoute([]), { session: { token: "vcom_tok", user: { login: "alice" } } });
+  host.libraryTracks.push({ title: "Home", artist_name: "Depeche Mode", album_title: "A" }, { title: "Home", artist_name: "Daughter", album_title: "B" });
+  await assert.rejects(() => host.tools.publish_lyrics({ title: "home" }), /several artists.*artistName/);
+
+  const out = await setup(lyricsRoute([]));
+  await assert.rejects(async () => out.host.tools.publish_lyrics({ title: "Jóga" }), /Not signed in/);
+});
+
 test("Show on Community opens the song's own page on its Community tab; a share link asks to import", async () => {
   const { host } = await setup(lyricsRoute([]));
   const opened = [];

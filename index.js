@@ -1327,10 +1327,27 @@ function canSaveLyrics() {
 }
 
 // The lyrics the app has for a song (its cache first, else its providers), or null.
+//
+// A cached answer is used at any age: what the app has is what's shown, and what
+// a publish should send, so a stale row must not trigger a provider walk. Only a
+// song with no usable cached lyrics at all goes to the providers.
 function currentLyrics(title, artist) {
   if (!canFetchInfo()) return Promise.resolve(null);
-  return api.informationTypes
-    .fetch("lyrics", trackEntity(title, artist))
+  var entity = trackEntity(title, artist);
+  var cached =
+    typeof api.informationTypes.getValue === "function"
+      ? api.informationTypes.getValue("lyrics", entity).catch(function (e) {
+          api.log("warn", "Couldn't read cached lyrics for " + title + ": " + errorText(e));
+          return null;
+        })
+      : Promise.resolve(null);
+  return cached
+    .then(function (row) {
+      if (row && row.status === "ok" && row.value && typeof row.value.text === "string" && row.value.text.trim()) {
+        return { status: "ok", value: row.value };
+      }
+      return api.informationTypes.fetch("lyrics", entity);
+    })
     .then(function (out) {
       return out && out.status === "ok" && out.value ? out.value : null;
     })
@@ -1483,6 +1500,45 @@ function publishLyrics(title, artist, album) {
     });
 }
 
+// The spelling the library uses for a song. The app caches lyrics under the
+// song's exact title and artist, but an assistant types them from memory
+// ("yesterday", no artist), which misses that cache and sends the song back to
+// the lyrics providers — possibly publishing a different copy than the one the
+// user has. Match loosely (case and accents, as songKey does) and adopt the
+// library's own spelling. No artist given and several artists match: ask for one
+// rather than guess. Not in the library: use what was given.
+function canonicalSong(title, artist, album) {
+  var given = { title: title, artist: artist, album: album };
+  if (!api.library || typeof api.library.ftsTracks !== "function") return Promise.resolve(given);
+  return api.library
+    .ftsTracks(title, { limit: 50 })
+    .then(function (rows) {
+      var hits = (rows || []).filter(function (t) {
+        return fold(t.title) === fold(title) && (!artist || fold(t.artist_name) === fold(artist));
+      });
+      if (!hits.length) return given;
+      var artists = {};
+      hits.forEach(function (t) {
+        artists[fold(t.artist_name)] = true;
+      });
+      if (Object.keys(artists).length > 1) {
+        throw new Error(
+          "“" + title + "” is by several artists in Viboplr (" +
+            hits.map(function (t) { return t.artist_name; }).filter(function (a, i, all) { return all.indexOf(a) === i; }).join(", ") +
+            "). Call again with artistName."
+        );
+      }
+      var hit = hits[0];
+      var wantAlbum = album ? hits.filter(function (t) { return fold(t.album_title) === fold(album); })[0] : null;
+      return { title: hit.title, artist: hit.artist_name || artist, album: (wantAlbum && wantAlbum.album_title) || album || hit.album_title || null };
+    })
+    .catch(function (e) {
+      if (e && /several artists/.test(e.message)) throw e;
+      api.log("warn", "Couldn't look up “" + title + "” in the library: " + errorText(e));
+      return given;
+    });
+}
+
 // The assistant's version: request/response, so the caller learns what happened.
 // It publishes only what the app already has for the song — it never takes
 // lyrics from the caller — and the "Plugin actions" switch gates it.
@@ -1494,7 +1550,10 @@ function publishLyricsTool(args) {
   if (!state.token) {
     throw new Error("Not signed in to Viboplr Community. Ask the user to sign in with GitHub in the Community view (You tab); you can't do that for them.");
   }
-  return publishLyricsCore(title, artist, album).then(function (out) {
+  return canonicalSong(title, artist, album).then(function (song) {
+    title = song.title;
+    return publishLyricsCore(song.title, song.artist, song.album);
+  }).then(function (out) {
     if (out.status === "no-lyrics") throw new Error("Viboplr has no lyrics for “" + title + "”. Nothing was published.");
     if (out.status === "plain-only") throw new Error("“" + title + "” only has plain lyrics in Viboplr; only synced lyrics can be shared. Nothing was published.");
     return { status: out.status, id: out.item.id, url: out.item.url };
