@@ -1,3 +1,15 @@
+## 1.0.0
+
+- **A Community tab on every song, album and artist page.** Everything people shared about it is right there: like it, import their cue sheets and synced lyrics (with the same Imported / Update badges), read and post comments. Albums show what's shared per track, artists their albums and songs. Importing synced lyrics there still asks first when the song has synced lyrics of its own, right in the tab.
+- **Comments can point at a moment.** While the song plays, **@ 2:13** pins your comment to where it is now.
+- **Timed comments on the seek bar** (You → *While you listen*): ticks where people commented on a moment of the playing song, the comment shown when you point at one. **Off until you switch it on**, because with it on every song you play is looked up on Viboplr Community.
+- **The Community view is smaller:** **Discover** (search songs, albums and artists, and what's new — each opens Viboplr's own page on its Community tab) · **Mixtapes** · **Subsonic servers** · **You** (publish from this computer, what you shared). The Cue sheets and Synced lyrics tabs are gone: those now live on each song's page.
+- Right-click a track → **Show on Community** opens its page on the Community tab (it replaces *Find shared cue sheets* and *Find shared synced lyrics*).
+- The song page's header line now leads with its likes: "♥ 128 · 2 cue sheets on Community".
+- A cue sheet or synced lyrics published from a compilation is filed under the album's own artist ("Various Artists"), so it shows on that album's page.
+- Your imports, your session and your saved mixtapes carry over unchanged.
+- Needs Viboplr 1.0.97 and the Viboplr Community server with music areas. New permission, asked for once on update: `playback:markers` (the ticks).
+
 ## 0.6.0
 
 - **What's shared for a song:** a track's page now says how many cue sheets and synced lyrics people have shared for it, e.g. "2 cue sheets · 1 lyric sheet on Community". It's looked up only when you open the page.

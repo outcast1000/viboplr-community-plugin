@@ -341,7 +341,7 @@ test("an unreachable server is a banner in the view, not a toast", async () => {
   const { host } = await setup(() => {
     throw new Error("connection refused");
   });
-  await host.actions.search({ query: "bjork" });
+  await host.actions["discover-search"]({ query: "bjork" });
   const banners = nodes(host.lastView(), "layout").filter((n) => /ds-banner/.test(n.className || ""));
   assert.equal(banners.length, 1);
   assert.match(banners[0].children[0].content, /connection refused/);
@@ -355,7 +355,7 @@ test("a proxy's web page instead of JSON is named as such, and requests identify
     host.requests.push({ url, init });
     return { status: 200, headers: {}, text: async () => "<!doctype html><title>Browser Isolation</title>" };
   };
-  await host.actions.search({ query: "x" });
+  await host.actions["discover-search"]({ query: "x" });
   const banners = nodes(host.lastView(), "layout").filter((n) => /ds-banner/.test(n.className || ""));
   assert.match(banners[0].children[0].content, /proxy or filter on your network/);
   assert.match(host.requests[0].init.headers["User-Agent"], /^Viboplr-Community-Plugin\//);
@@ -381,17 +381,16 @@ test("a cue sheet row says when an imported sheet has an update", async () => {
   assert.equal(plugin._cardRow(cue, { ...ITEM, id: "other" }).badge, undefined);
 });
 
-test("a share link opens the song and asks to import", async () => {
+test("a share link opens Discover and asks to import", async () => {
   const { host } = await setup((u) => {
     if (u.pathname === "/v1/items/abc123") return { body: { item: { ...ITEM, payload: SHEET } } };
-    if (u.pathname === "/v1/items") return { body: { items: [ITEM] } };
+    if (u.pathname === "/v1/activity") return { body: { entries: [], hasMore: false } };
   });
   await host.deepLink("viboplr://plugin/community/open?id=abc123");
-  await flush();
+  for (let i = 0; i < 5; i++) await flush();
   assert.deepEqual(host.navigated, ["community"]);
   const view = host.lastView();
-  assert.equal(nodes(view, "tabs")[0].activeTab, "cue_sheet");
-  assert.equal(nodes(view, "select").find((n) => n.action === "cue-scope").value, "song");
+  assert.equal(nodes(view, "tabs")[0].activeTab, "discover");
   assert.equal(nodes(view, "confirm")[0].confirmAction, "confirm-import");
 });
 
@@ -478,7 +477,7 @@ test("on an app without requestAdd, Add opens the server's page instead", async 
   assert.equal(host.addRequests.length, 0);
 });
 
-test("tabs are one per module plus Mine, which has a section per module", async () => {
+test("tabs are Discover, one per non-music module, and You, which has a section per module", async () => {
   const { host } = await setup(
     (u) => {
       if (u.pathname === "/v1/me/items") {
@@ -489,13 +488,13 @@ test("tabs are one per module plus Mine, which has a section per module", async 
     { session: { token: "vcom_tok", user: { login: "alice" } } }
   );
   await host.addSheet("Jóga", "Björk", SHEET);
-  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["cue_sheet", "synced_lyrics", "mixtape", "subsonic_server", "mine"]);
+  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["discover", "mixtape", "subsonic_server", "you"]);
 
-  await host.actions.tab({ tabId: "mine" });
+  await host.actions.tab({ tabId: "you" });
   const sections = nodes(host.lastView(), "section");
   // Cue sheets and mixtapes bring their own sections (what's on this computer); servers use the generic one.
-  assert.deepEqual(sections.map((n) => n.title), ["Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your Subsonic servers"]);
-  const [sheets, , , servers] = sections.map((n) => nodes({ children: n.children }, "track-row-list")[0]);
+  assert.deepEqual(sections.map((n) => n.title), ["While you listen", "Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your Subsonic servers"]);
+  const [, sheets, , , servers] = sections.map((n) => nodes({ children: n.children }, "track-row-list")[0]);
   assert.equal(sheets.items[0].badge.label, "Published", "matched against your cue sheets online");
   assert.equal(servers.items[0].title, "Jazz box");
   assert.deepEqual(servers.items[0].actions, ["page", "edit"]);
@@ -524,7 +523,7 @@ test("a module the plugin has never heard of still gets a working tab and Mine s
             modules: [
               ...plugin_modules(),
               {
-                kind: "eq_preset", slug: "eq-presets", name: "EQ presets", singular: "EQ preset", intro: "",
+                kind: "eq_preset", slug: "eq-presets", name: "EQ presets", singular: "EQ preset", intro: "", area: "presets",
                 notice: "Shared EQ presets.", popularLabel: "Most used", useNoun: ["use", "uses"],
                 url: "https://community.viboplr.com/eq-presets", shareUrl: null,
               },
@@ -539,7 +538,7 @@ test("a module the plugin has never heard of still gets a working tab and Mine s
     { session: { token: "vcom_tok", user: { login: "bob" } } }
   );
   await plugin._loadModules();
-  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.label), ["Cue sheets", "Synced lyrics", "Mixtapes", "Subsonic servers", "EQ presets", "Mine"]);
+  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.label), ["Discover", "Mixtapes", "Subsonic servers", "EQ presets", "You"]);
   assert.ok(host.storage.get("modules").some((m) => m.kind === "eq_preset"), "remembered for the next start");
 
   await host.actions.tab({ tabId: "eq_preset" });
@@ -551,9 +550,9 @@ test("a module the plugin has never heard of still gets a working tab and Mine s
   await host.actions.page({ itemId: "eq1" });
   assert.equal(host.opened.at(-1), "https://community.viboplr.com/eq-presets/eq1");
 
-  await host.actions.tab({ tabId: "mine" });
+  await host.actions.tab({ tabId: "you" });
   const titles = nodes(host.lastView(), "section").map((n) => n.title);
-  assert.deepEqual(titles, ["Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your Subsonic servers", "Your eq presets"]); // eq: no `plural`, so the lowercased name
+  assert.deepEqual(titles, ["While you listen", "Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your Subsonic servers", "Your eq presets"]); // eq: no `plural`, so the lowercased name
 });
 
 // The built-in module descriptions as the server would send them.
@@ -566,7 +565,7 @@ test("a bad module list from the server is ignored, not fatal", async () => {
     if (u.pathname === "/v1/modules") return { body: { modules: [{ kind: 3 }, null, { name: "no kind" }] } };
   });
   await plugin._loadModules();
-  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["cue_sheet", "synced_lyrics", "mixtape", "subsonic_server", "mine"]);
+  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["discover", "mixtape", "subsonic_server", "you"]);
 });
 
 // ---- mixtapes ---------------------------------------------------------------
@@ -641,7 +640,7 @@ test("publishing a playlist sends its track list and never a file path", async (
   assert.match(host.lastNotice().message, /Published “Sunday”/);
 
   // Mine now shows it as published, with the online actions.
-  await host.actions.tab({ tabId: "mine" });
+  await host.actions.tab({ tabId: "you" });
   const section = nodes(host.lastView(), "section").find((s) => s.title === "Your playlists");
   const row = nodes({ children: section.children }, "track-row-list")[0].items[0];
   assert.equal(row.badge.label, "Published");
@@ -701,7 +700,7 @@ test("Save remembers where the mixtape came from, and a newer version replaces t
   // bob republishes: coming back to the tab refetches, the row offers an
   // update, and the update swaps the saved copy.
   at.version = 2;
-  await host.actions.tab({ tabId: "mine" });
+  await host.actions.tab({ tabId: "you" });
   await host.actions.tab({ tabId: "mixtape" });
   row = nodes(host.lastView(), "track-row-list")[0].items[0];
   assert.equal(row.badge.label, "Update");
@@ -722,7 +721,7 @@ test("Mine offers your own playlists, never Liked/Disliked or the app's mixes", 
   await host.addPlaylist("Nothing yet", []);
   // Even one already published stays out: it's still not the user's own list.
   posted.push({ title: "Kyuss Mix" });
-  await host.actions.tab({ tabId: "mine" });
+  await host.actions.tab({ tabId: "you" });
   const section = nodes(host.lastView(), "section").find((s) => s.title === "Your playlists");
   const rows = nodes({ children: section.children }, "track-row-list")[0].items;
   assert.deepEqual(rows.map((r) => r.title), ["Sunday"]);
@@ -732,7 +731,7 @@ test("a saved community mixtape isn't yours to publish", async () => {
   const posted = [];
   const { host } = await setup(mixRoute(posted), { session: { token: "vcom_tok", user: { login: "alice" } } });
   const id = await host.addPlaylist("Late night", MIX_TRACKS, { metadata: { communityId: "mx1", communityVersion: 1, communityBy: "bob" } });
-  await host.actions.tab({ tabId: "mine" });
+  await host.actions.tab({ tabId: "you" });
   const section = nodes(host.lastView(), "section").find((s) => s.title === "Your playlists");
   const row = nodes({ children: section.children }, "track-row-list")[0].items[0];
   assert.equal(row.badge.label, "From the community");
@@ -794,17 +793,25 @@ const JOGA_KEY = "track:bjork:joga";
 test("the plugin is not a lyrics provider", async () => {
   const p = loadPlugin();
   const manifest = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "manifest.json"), "utf8"));
-  // Its one information type is the track page's "shared on Community" line.
+  // The track page's "shared on Community" line, and the Community tab on each kind of page.
   assert.deepEqual(
     manifest.contributes.informationTypes.map((t) => [t.id, t.entity, t.displayKind]),
-    [["community_shared", "track", "title_line"]]
+    [
+      ["community_shared", "track", "title_line"],
+      ["community_track", "track", "plugin_view"],
+      ["community_album", "album", "plugin_view"],
+      ["community_artist", "artist", "plugin_view"],
+    ]
   );
   assert.ok(manifest.permissions.includes("lyrics:write"));
   assert.equal(p._provideLyrics, undefined);
 });
 
+// How a lyrics item reads in a list (the Community tab's rows).
+const lyricsRow = (plugin, item) => plugin._cardRow(plugin._builtinModules.find((m) => m.kind === "synced_lyrics"), item);
+
 test("Import makes the shared lyrics the song's lyrics through api.lyrics.save", async () => {
-  const { host } = await setup(lyricsRoute([]));
+  const { plugin, host } = await setup(lyricsRoute([]));
   host.webLyrics.set(JOGA_KEY, { text: "plain words", kind: "plain" });
   await host.actions["import-lyrics"]({ itemId: "ly1" });
   assert.deepEqual(host.lyricsSaves.map((s) => s.track), [{ title: "Jóga", artistName: "Björk", albumTitle: "Homogenic" }]);
@@ -814,8 +821,7 @@ test("Import makes the shared lyrics the song's lyrics through api.lyrics.save",
   await flush();
   assert.ok(host.requests.some((r) => r.url.endsWith("/v1/items/ly1/imported")), "an import counts");
 
-  await host.actions.tab({ tabId: "synced_lyrics" });
-  const row = nodes(host.lastView(), "track-row-list")[0].items[0];
+  const row = lyricsRow(plugin, LYRICS_ITEM);
   assert.equal(row.badge.label, "Imported");
 });
 
@@ -840,28 +846,25 @@ test("Import asks first when the song already has synced lyrics, and says where 
 });
 
 test("Undo hands the song back to the user's providers", async () => {
-  const { host } = await setup(lyricsRoute([]));
+  const { plugin, host } = await setup(lyricsRoute([]));
   await host.actions["import-lyrics"]({ itemId: "ly1" });
   host.webLyrics.set(JOGA_KEY, { text: "plain words", kind: "plain" });
-  await host.actions.tab({ tabId: "mine" });
+  await host.actions.tab({ tabId: "you" });
   const section = nodes(host.lastView(), "section").find((s) => s.title === "Synced lyrics");
   const row = nodes({ children: section.children }, "track-row-list")[0].items[0];
   assert.equal(row.badge.label, "Imported");
   await host.actions["remove-lyrics"]({ itemId: row.id });
   assert.equal(host.infoFetches.at(-1).opts.force, true, "re-walks the chain");
   assert.equal(host.lyricsCache.get(JOGA_KEY).text, "plain words");
-  await host.actions.tab({ tabId: "synced_lyrics" });
-  assert.deepEqual(nodes(host.lastView(), "track-row-list")[0].items[0].actions, ["import-lyrics", "page"], "importable again");
+  assert.deepEqual(lyricsRow(plugin, LYRICS_ITEM).actions, ["import-lyrics", "page"], "importable again");
 });
 
 test("a newer version offers Update, and Update saves the new text without asking", async () => {
   const at = { version: 1 };
-  const { host } = await setup(lyricsRoute([], at));
+  const { plugin, host } = await setup(lyricsRoute([], at));
   await host.actions["import-lyrics"]({ itemId: "ly1" });
   at.version = 2;
-  await host.actions.tab({ tabId: "mine" });
-  await host.actions.tab({ tabId: "synced_lyrics" });
-  const row = nodes(host.lastView(), "track-row-list")[0].items[0];
+  const row = lyricsRow(plugin, { ...LYRICS_ITEM, version: 2 });
   assert.equal(row.badge.label, "Update");
   await host.actions["update-lyrics"]({ itemId: "ly1" });
   assert.equal(nodes(host.lastView(), "confirm").length, 0);
@@ -896,12 +899,12 @@ test("publishing shares any synced lyrics the app has, from any source", async (
   assert.deepEqual(posted[0], { kind: "synced_lyrics", title: "Jóga", artistName: "Björk", albumName: "Homogenic", lrc: LRC, durationSecs: 305 });
 });
 
-test("Find shared synced lyrics searches the tab for that song; a share link asks to import", async () => {
+test("Show on Community opens the song's own page on its Community tab; a share link asks to import", async () => {
   const { host } = await setup(lyricsRoute([]));
-  await host.menu["find-lyrics"]({ kind: "track", title: "Jóga", artistName: "Björk" });
-  const search = host.requests.filter((r) => r.url.includes("/v1/items/search")).at(-1);
-  assert.equal(new URL(search.url).searchParams.get("q"), "Björk Jóga");
-  assert.equal(nodes(host.lastView(), "tabs")[0].activeTab, "synced_lyrics");
+  const opened = [];
+  host.api.ui.navigateToEntity = (kind, ref, opts) => opened.push([kind, ref, opts]);
+  await host.menu["show-on-community"]({ kind: "track", title: "Jóga", artistName: "Björk", albumTitle: "Homogenic" });
+  assert.deepEqual(opened, [["track", { name: "Jóga", artistName: "Björk", albumTitle: "Homogenic" }, { tab: "community_track" }]]);
 
   await host.deepLink("viboplr://plugin/community/open?id=ly1");
   for (let i = 0; i < 10; i++) await flush();

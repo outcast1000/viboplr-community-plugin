@@ -1,10 +1,10 @@
 {
   "id": "community",
   "name": "Viboplr Community",
-  "version": "0.6.0",
+  "version": "1.0.0",
   "author": "Viboplr",
-  "description": "Share your Now Playing cue sheets, your synced lyrics and your playlists (as mixtapes) on Viboplr Community, and play or import what other people made. Signed-in members can also add the Subsonic / Navidrome servers their owners opened to the community. Sign in with GitHub to publish or to see shared servers; browsing, playing and importing everything else needs no account.",
-  "minAppVersion": "1.0.93",
+  "description": "Viboplr Community inside the app: a Community tab on every song, album and artist page — like and comment, import shared cue sheets and synced lyrics — plus mixtapes, Subsonic servers opened to members, and publishing your own. Sign in with GitHub to share, like, comment or see shared servers; browsing, playing and importing needs no account.",
+  "minAppVersion": "1.0.97",
   "stability": "experimental",
   "homepage": "https://github.com/outcast1000/viboplr-community-plugin",
   "updateUrl": "https://github.com/outcast1000/viboplr-community-plugin/releases/latest/download/update.json",
@@ -20,27 +20,122 @@
     "library:read",
     "library:write",
     "lyrics:write",
-    "plugins:call"
+    "plugins:call",
+    "playback:markers"
   ],
   "apiUsage": [
-    { "api": "network.fetch", "reason": "Browse, import and publish on community.viboplr.com" },
-    { "api": "network.openUrl", "reason": "Sign in with GitHub in your browser, and open an item's page on the server" },
-    { "api": "cues.set", "reason": "Install a cue sheet you chose to import" },
-    { "api": "cues.list", "reason": "List your own sheets so you can publish them" },
-    { "api": "playback.getCurrentTrack", "reason": "Find shared sheets for the song that's playing" },
-    { "api": "playback.getQueue", "reason": "Publish the queue as a mixtape, when you ask to" },
-    { "api": "playback.playTracks", "reason": "Play a mixtape you chose" },
-    { "api": "playlists.list", "reason": "List your playlists so you can publish them, and know which mixtapes you saved" },
-    { "api": "playlists.getTracks", "reason": "Read the track list of a playlist you publish (titles and artists only, never file paths)" },
-    { "api": "playlists.save", "reason": "Save a mixtape you chose to your Playlists" },
-    { "api": "playlists.delete", "reason": "Replace a saved mixtape with its newer version, when you update it" },
-    { "api": "lyrics.save", "reason": "Make synced lyrics you chose to import the song's lyrics" },
-    { "api": "informationTypes.fetch", "reason": "Read a song's synced lyrics when you publish them, and look the song up again when you undo an import" },
-    { "api": "collections.requestAdd", "reason": "Open the app's Add Server dialog for a listed server — you confirm there" },
-    { "api": "informationTypes.onFetch", "reason": "Say on a song's page how many cue sheets and synced lyrics are shared for it" },
-    { "api": "nowPlayingInfo.onFetch", "reason": "The same count in the mini player, only if you switch the item on" }
+    {
+      "api": "network.fetch",
+      "reason": "Browse, import and publish on community.viboplr.com"
+    },
+    {
+      "api": "network.openUrl",
+      "reason": "Sign in with GitHub in your browser, and open an item's page on the server"
+    },
+    {
+      "api": "cues.set",
+      "reason": "Install a cue sheet you chose to import"
+    },
+    {
+      "api": "cues.get",
+      "reason": "Check whether the song already has a cue sheet before an import replaces it, and offer Publish my cue sheet on its tab"
+    },
+    {
+      "api": "cues.list",
+      "reason": "List your own sheets so you can publish them"
+    },
+    {
+      "api": "library.ftsTracks",
+      "reason": "Find a track's album artist when you publish, so a compilation's sheet is filed under its album"
+    },
+    {
+      "api": "playback.getCurrentTrack",
+      "reason": "Find shared sheets for the song that's playing"
+    },
+    {
+      "api": "playback.getPosition",
+      "reason": "Pin a comment to the moment the song is at, when you press @"
+    },
+    {
+      "api": "playback.getQueue",
+      "reason": "Publish the queue as a mixtape, when you ask to"
+    },
+    {
+      "api": "playback.playTracks",
+      "reason": "Play a mixtape you chose"
+    },
+    {
+      "api": "playlists.list",
+      "reason": "List your playlists so you can publish them, and know which mixtapes you saved"
+    },
+    {
+      "api": "playlists.getTracks",
+      "reason": "Read the track list of a playlist you publish (titles and artists only, never file paths)"
+    },
+    {
+      "api": "playlists.save",
+      "reason": "Save a mixtape you chose to your Playlists"
+    },
+    {
+      "api": "playlists.delete",
+      "reason": "Replace a saved mixtape with its newer version, when you update it"
+    },
+    {
+      "api": "lyrics.save",
+      "reason": "Make synced lyrics you chose to import the song's lyrics"
+    },
+    {
+      "api": "informationTypes.fetch",
+      "reason": "Read a song's synced lyrics when you publish them, and look the song up again when you undo an import"
+    },
+    {
+      "api": "collections.requestAdd",
+      "reason": "Open the app's Add Server dialog for a listed server — you confirm there"
+    },
+    {
+      "api": "nowPlayingInfo.onFetch",
+      "reason": "The same count in the mini player, only if you switch the item on"
+    },
+    {
+      "api": "nowPlayingInfo.registerItem",
+      "reason": "Offer that mini player line (off until you switch it on)"
+    },
+    {
+      "api": "informationTypes.onFetch",
+      "reason": "Draw the Community tab on song, album and artist pages, and say on a song's page what's shared for it"
+    },
+    {
+      "api": "informationTypes.setSectionData",
+      "reason": "Redraw the Community tab after you like or comment"
+    },
+    {
+      "api": "ui.navigateToEntity",
+      "reason": "Open a song, album or artist you found in Discover on its Community tab"
+    },
+    {
+      "api": "ui.requestAction",
+      "reason": "Open that page on an older Viboplr, without the tab"
+    },
+    {
+      "api": "ui.navigateToView",
+      "reason": "Open the Community view from a share link"
+    },
+    {
+      "api": "ui.setViewHeader",
+      "reason": "Show in the view's header whether you're signed in, with Sign in / Sign out and Open website"
+    },
+    {
+      "api": "playback.setMarkers",
+      "reason": "Show timed comments as ticks on the seek bar, only if you switch that on"
+    },
+    {
+      "api": "playback.onTrackStarted",
+      "reason": "Load the timed comments for the song that starts, only while the seek-bar ticks are on"
+    }
   ],
-  "viewHeader": { "subtitle": "Cue sheets, synced lyrics, mixtapes and Subsonic servers shared by Viboplr users" },
+  "viewHeader": {
+    "subtitle": "What Viboplr listeners share: songs, albums and artists, mixtapes, and Subsonic servers"
+  },
   "contributes": {
     "informationTypes": [
       {
@@ -50,17 +145,68 @@
         "entity": "track",
         "displayKind": "title_line",
         "ttl": 21600
+      },
+      {
+        "id": "community_track",
+        "name": "Community",
+        "description": "Cue sheets, synced lyrics, likes and comments shared for this song on Viboplr Community",
+        "entity": "track",
+        "displayKind": "plugin_view",
+        "ttl": 300
+      },
+      {
+        "id": "community_album",
+        "name": "Community",
+        "description": "Likes, comments and what's shared per track on Viboplr Community",
+        "entity": "album",
+        "displayKind": "plugin_view",
+        "ttl": 300
+      },
+      {
+        "id": "community_artist",
+        "name": "Community",
+        "description": "Likes, comments, albums and songs with something shared on Viboplr Community",
+        "entity": "artist",
+        "displayKind": "plugin_view",
+        "ttl": 300
       }
     ],
     "sidebarItems": [
-      { "id": "community", "label": "Community", "icon": "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M5 7a4 4 0 1 0 8 0a4 4 0 1 0-8 0M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" }
+      {
+        "id": "community",
+        "label": "Community",
+        "icon": "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M5 7a4 4 0 1 0 8 0a4 4 0 1 0-8 0M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
+      }
     ],
     "contextMenuItems": [
-      { "id": "find-cues", "label": "Find shared cue sheets", "targets": ["track"] },
-      { "id": "publish-cues", "label": "Publish cue sheet…", "targets": ["track"] },
-      { "id": "find-lyrics", "label": "Find shared synced lyrics", "targets": ["track"] },
-      { "id": "publish-lyrics", "label": "Publish synced lyrics…", "targets": ["track"] },
-      { "id": "publish-mixtape", "label": "Publish as a mixtape…", "targets": ["playlist"] }
+      {
+        "id": "show-on-community",
+        "label": "Show on Community",
+        "targets": [
+          "track"
+        ]
+      },
+      {
+        "id": "publish-cues",
+        "label": "Publish cue sheet…",
+        "targets": [
+          "track"
+        ]
+      },
+      {
+        "id": "publish-lyrics",
+        "label": "Publish synced lyrics…",
+        "targets": [
+          "track"
+        ]
+      },
+      {
+        "id": "publish-mixtape",
+        "label": "Publish as a mixtape…",
+        "targets": [
+          "playlist"
+        ]
+      }
     ]
   }
 }

@@ -34,6 +34,16 @@ function makeHost({ route, current = null, queue = [], appVersion = "1.0.94" } =
     // Now Playing info: registered items and their fetch handlers.
     npItems: [],
     npHandlers: {},
+    // Host APIs from app 1.0.97: tab redraws, seek-bar markers,
+    // page opens, and the track-started handler.
+    sectionData: [],
+    markers: [],
+    entityOpens: [],
+    requestedActions: [],
+    trackStarted: null,
+    position: 0,
+    // What api.library.ftsTracks finds (library Track rows).
+    libraryTracks: [],
   };
   let nextPlaylistId = 1;
   const key = (title, artist) =>
@@ -91,9 +101,18 @@ function makeHost({ route, current = null, queue = [], appVersion = "1.0.94" } =
       delete: async (title, artist) => host.cues.delete(key(title, artist)),
     },
     playback: {
-      getCurrentTrack: () => current,
+      getPosition: () => host.position,
+      setMarkers: (trackKey, markers) => host.markers.push({ trackKey, markers }),
+      onTrackStarted: (handler) => {
+        host.trackStarted = handler;
+        return () => {};
+      },
+      getCurrentTrack: () => host.current,
       getQueue: () => ({ tracks: host.queue, index: 0 }),
       playTracks: (tracks, startIndex, context) => host.plays.push({ tracks, startIndex, context }),
+    },
+    library: {
+      ftsTracks: async () => structuredClone(host.libraryTracks),
     },
     playlists: {
       list: async () =>
@@ -141,6 +160,9 @@ function makeHost({ route, current = null, queue = [], appVersion = "1.0.94" } =
         host.infoProviders[typeId] = handler;
         return () => {};
       },
+      setSectionData: async (typeId, entity, data) => {
+        host.sectionData.push({ typeId, entity, data });
+      },
     },
     nowPlayingInfo: {
       registerItem: (descriptor) => {
@@ -172,6 +194,8 @@ function makeHost({ route, current = null, queue = [], appVersion = "1.0.94" } =
         return () => {};
       },
       navigateToView: (id) => host.navigated.push(id),
+      navigateToEntity: (kind, ref, opts) => host.entityOpens.push([kind, ref, opts]),
+      requestAction: (action, payload) => host.requestedActions.push([action, payload]),
     },
     contextMenu: {
       onAction: (id, handler) => {
@@ -181,6 +205,7 @@ function makeHost({ route, current = null, queue = [], appVersion = "1.0.94" } =
     },
   };
 
+  host.current = current;
   host.lastView = () => host.views[host.views.length - 1].data;
   host.lastHeader = () => host.headers[host.headers.length - 1].header;
   host.lastNotice = () => host.notices[host.notices.length - 1];

@@ -4,7 +4,7 @@
 // Design notes:
 //  - MODULES COME FROM THE SERVER. GET /v1/modules lists what can be shared,
 //    and every item carries a `card` (title, facts, in-Viboplr action), so a
-//    new module gets a tab and a Mine section here with no plugin release.
+//    new module gets a tab and a section on You here with no plugin release.
 //    INTEGRATIONS adds what only app code can do for a known module (import a
 //    cue sheet, open the Add Server dialog). See "Modules" below.
 //  - THE SERVER OWNS ACCOUNTS, THE APP OWNS WHAT IT HOLDS. Sign-in happens in
@@ -23,20 +23,28 @@
 //    in isolation, or a system where viboplr:// isn't registered.
 //  - PROVENANCE LIVES HERE. A sheet file has no "came from the community"
 //    field, so the mapping song → community item (+ the local updatedAt at
-//    import) is kept in this plugin's storage. That is what lets Mine tell an
+//    import) is kept in this plugin's storage. That is what lets You tell an
 //    untouched import (not ours to republish) from one the user has changed.
 //  - A MIXTAPE IS A TRACK LIST. Publishing sends title/artist/album/length
 //    only — never a track's source (a file path names the publisher's home
 //    folder; a plugin URI plays only where that plugin is installed). Played
 //    or saved here, every entry is metadata-only and the host's resolvers find
 //    a copy. A saved mixtape remembers where it came from in its playlist
-//    `metadata` ({ communityId, communityVersion }), so Mine can tell it apart
+//    `metadata` ({ communityId, communityVersion }), so You can tell it apart
 //    from the user's own and the tab can offer an update.
 //  - AN IMPORT IS A ONE-OFF WRITE. Shared synced lyrics become the song's
 //    lyrics through api.lyrics.save, like an edit in the app; the plugin is not
 //    a lyrics provider and looks nothing up while anyone listens.
 //  - NOT READY IS A BANNER. A server that can't be reached is shown inside the
 //    view with a Retry, never as a toast (plugin view design guidelines).
+//  - MUSIC LIVES ON VIBOPLR'S OWN PAGES. Cue sheets, synced lyrics, likes
+//    and comments about a song, album or artist are a "Community" tab on
+//    that page (a `plugin_view` information type), not tabs of this view. The
+//    view is Discover (search + what's new, opening those pages) · Mixtapes ·
+//    Subsonic servers · You.
+//  - NOTHING IS ASKED WHILE MUSIC PLAYS unless the user switched it on: the
+//    Now Playing item and the seek-bar ticks (timed comments) both name every
+//    song played to the server, so both start off.
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -49,10 +57,14 @@ var AUTH_TTL_MS = 10 * 60 * 1000;
 var DEVICE_POLL_DEFAULT_SECS = 5;
 var DEVICE_TTL_DEFAULT_SECS = 600;
 var LINK_PREFIX = "viboplr://plugin/community/";
-var USER_AGENT = "Viboplr-Community-Plugin/0.2(+https://github.com/outcast1000/viboplr-community-plugin)";
+var USER_AGENT = "Viboplr-Community-Plugin/1.0(+https://github.com/outcast1000/viboplr-community-plugin)";
 var MAX_AUTHOR_CHARS = 64;
 var FIRST_LOAD_DELAY_MS = 3000;
-var MINE = "mine";
+var MINE = "you";
+var DISCOVER = "discover";
+// The Community tab on each kind of page (information type ids: one per
+// entity kind, since a plugin's type ids are unique).
+var TAB_TYPES = { track: "community_track", album: "community_album", artist: "community_artist" };
 
 var api = null;
 var state = null; // set up in activate() — BUILTIN_MODULES must exist first
@@ -68,8 +80,25 @@ function freshState() {
     auth: null,
     // What can be shared (GET /v1/modules); BUILTIN_MODULES until it answers.
     modules: BUILTIN_MODULES.slice(),
-    // The tab: a module's kind, or "mine".
-    tab: BUILTIN_MODULES[0].kind,
+    // The tab: "discover", a module's kind (Mixtapes, Subsonic servers), or "you".
+    tab: DISCOVER,
+    // Discover: song/album/artist search and the activity feed.
+    discover: { query: "", results: null, feed: null, feedPage: 0, feedMore: false },
+    // Subjects as the server last described them: by id (for opening one) and
+    // a one-minute cache of lookups by name (resolveSubject). The header line,
+    // the mini player item and the ticks share its anonymous entries; the tab
+    // always asks again, as the member, and caches that apart.
+    subjectsById: {},
+    subjectLookups: {},
+    // The Community tab's data per page, by tabKey(entity).
+    tabs: {},
+    // Seek-bar ticks for the playing song's timed comments. Off by default:
+    // with them on, every song played is named to the server.
+    ticks: false,
+    // The track whose ticks were last asked for, so it's asked once.
+    ticksKey: null,
+    // Comments posted from a tab this session: the comment box's stateKey.
+    commentsPosted: 0,
     // Per module: { query, sort, page, items, more }.
     browse: {},
     // Per module: the items this user shared (GET /v1/me/items).
@@ -77,11 +106,6 @@ function freshState() {
     loading: false,
     error: null,
     // --- cue sheets ---
-    // Everything ("all"), or the sheets for one song ("song").
-    cueScope: "all",
-    // The song the cue sheets are narrowed to: { title, artist }.
-    song: null,
-    songItems: null,
     // api.cues.list() rows.
     local: null,
     // songKey → { id, version, updatedAt } for sheets imported from the community.
@@ -96,8 +120,6 @@ function freshState() {
     // songKey → { id, version, title, artist, by, url } for lyrics imported
     // from the community (the text itself is the app's, via api.lyrics.save).
     lyricsImports: {},
-    // songKey → { at, counts } — what's shared about a song, briefly cached.
-    songCounts: {},
   };
 }
 
@@ -174,7 +196,7 @@ function errorText(e) {
 //
 // Generic: every module gets a tab (search, sort, load more, rows from each
 // item's card, "Open page", "Share" when the module has a website form) and a
-// Mine section (what you shared, with Open page / Edit). INTEGRATIONS, keyed
+// section on You (what you shared, with Open page / Edit). INTEGRATIONS, keyed
 // by kind, adds what only app code can do. A module with no integration still
 // works — it just can't do more than the website does.
 
@@ -191,6 +213,7 @@ var BUILTIN_MODULES = [
     useNoun: ["import", "imports"],
     url: SERVER + "/cue-sheets",
     shareUrl: null,
+    area: "music",
   },
   {
     kind: "synced_lyrics",
@@ -203,6 +226,7 @@ var BUILTIN_MODULES = [
     useNoun: ["import", "imports"],
     url: SERVER + "/lyrics",
     shareUrl: null,
+    area: "music",
   },
   {
     kind: "mixtape",
@@ -215,6 +239,7 @@ var BUILTIN_MODULES = [
     useNoun: ["play", "plays"],
     url: SERVER + "/mixtapes",
     shareUrl: null,
+    area: "mixtapes",
   },
   {
     kind: "subsonic_server",
@@ -228,8 +253,24 @@ var BUILTIN_MODULES = [
     url: SERVER + "/servers",
     shareUrl: SERVER + "/servers/new",
     membersOnly: true,
+    area: "servers",
   },
 ];
+
+// A module's area (the server's `area`; for servers from before it: mixtapes
+// and members-only servers are their own areas, everything else is music).
+function areaOf(m) {
+  if (m && typeof m.area === "string") return m.area;
+  if (m && m.membersOnly) return "servers";
+  return m && m.kind === "mixtape" ? "mixtapes" : "music";
+}
+
+// Music modules have no tab: their items live on Viboplr's own song pages.
+function tabModules() {
+  return state.modules.filter(function (m) {
+    return areaOf(m) !== "music";
+  });
+}
 
 // A module's plural inside a sentence. Servers that predate `plural` only send
 // `name`; lowercasing it is the fallback, not the rule, since it would turn
@@ -256,7 +297,7 @@ function forgetMembersOnly() {
 function validModules(list) {
   if (!Array.isArray(list)) return [];
   return list.filter(function (m) {
-    return m && typeof m.kind === "string" && typeof m.name === "string" && typeof m.url === "string" && m.kind !== MINE;
+    return m && typeof m.kind === "string" && typeof m.name === "string" && typeof m.url === "string" && m.kind !== MINE && m.kind !== DISCOVER;
   });
 }
 
@@ -339,7 +380,7 @@ function browseState(kind) {
 //   controls   () → nodes shown above the module's list
 //   body       () → nodes replacing the generic list, or null for the generic one
 //   load       () → Promise replacing the generic load, or null
-//   mine       { title, nodes(), load() } — the module's Mine section, in
+//   mine       { title, nodes(), load() } — the module's section on You, in
 //              place of the generic "what you shared" list
 
 var INTEGRATIONS = {
@@ -364,26 +405,6 @@ var INTEGRATIONS = {
         row.actions = ["import", "page"];
       }
       return row;
-    },
-    controls: function () {
-      return [
-        {
-          type: "select",
-          label: "Show",
-          action: "cue-scope",
-          value: state.cueScope,
-          options: [
-            { value: "all", label: "All cue sheets" },
-            { value: "song", label: "For one song" },
-          ],
-        },
-      ];
-    },
-    body: function () {
-      return state.cueScope === "song" ? songNodes() : null;
-    },
-    load: function () {
-      return state.cueScope === "song" ? loadSong(state.song || currentSong()) : null;
     },
     mine: {
       title: "Cue sheets on this computer",
@@ -572,6 +593,7 @@ function sessionLost() {
     api.log("error", "Couldn't clear the stored session: " + errorText(e));
   });
   render();
+  redrawTabs(false);
 }
 
 // ---------------------------------------------------------------------------
@@ -733,7 +755,7 @@ function completeSignIn(data) {
       render();
       // The open tab may be one only members can see; load it now.
       var m = currentModule();
-      return Promise.all([loadShared(), m && m.membersOnly ? loadTab() : null]);
+      return Promise.all([loadShared(), m && m.membersOnly ? loadTab() : null, redrawTabs(true)]);
     })
     .catch(function (e) {
       render();
@@ -759,6 +781,7 @@ function signOut() {
     .then(function () {
       notify("Signed out of Viboplr Community.");
       render();
+      return redrawTabs(false);
     });
 }
 
@@ -788,7 +811,7 @@ function loadModules() {
       var mods = validModules(data && data.modules);
       if (!mods.length) return;
       state.modules = mods;
-      if (state.tab !== MINE && !moduleFor(state.tab)) state.tab = mods[0].kind;
+      if (!isTab(state.tab)) state.tab = DISCOVER;
       render();
       return api.storage.set("modules", mods);
     })
@@ -851,14 +874,30 @@ function loadMine() {
   });
 }
 
+function isTab(tab) {
+  return (
+    tab === MINE ||
+    tab === DISCOVER ||
+    tabModules().some(function (m) {
+      return m.kind === tab;
+    })
+  );
+}
+
 function switchTab(tab) {
-  state.tab = tab === MINE || moduleFor(tab) ? tab : state.modules[0].kind;
+  state.tab = isTab(tab) ? tab : DISCOVER;
   state.error = null;
-  return state.tab === MINE ? loadMine() : loadTab();
+  if (state.tab === MINE) return loadMine();
+  if (state.tab === DISCOVER) return loadDiscover();
+  return loadTab();
 }
 
 function knownItem(id) {
-  var lists = [state.songItems || []];
+  var lists = [];
+  Object.keys(state.tabs).forEach(function (k) {
+    var t = state.tabs[k];
+    lists.push(t.cues || [], t.lyrics || []);
+  });
   Object.keys(state.browse).forEach(function (k) {
     lists.push(state.browse[k].items || []);
   });
@@ -889,26 +928,55 @@ function pageFor(id) {
 // with it on every song played is named to the server.
 
 // "Nothing shared" is an answer too, so the cache holds empties.
-var SONG_COUNTS_TTL_MS = 10 * 60 * 1000;
+var SUBJECT_TTL_MS = 60 * 1000;
 
-// { [kind]: n } for one song; {} when nothing is shared (404 — or a server
-// from before subjects, which answers 404 to the route itself).
-function songCounts(title, artist) {
-  var key = songKey(title, artist);
-  var hit = state.songCounts[key];
-  if (hit && Date.now() - hit.at < SONG_COUNTS_TTL_MS) return Promise.resolve(hit.counts);
-  return request("GET", "/v1/subjects/resolve?" + queryString({ kind: "track", title: title, artist: artist }))
+function lookupKey(kind, name, artist) {
+  return kind + ":" + (kind === "artist" ? "" : fold(artist)) + ":" + fold(name);
+}
+
+// What the server knows about one song, album (by its album artist) or artist,
+// or null when nothing was ever shared about it (404 — or a server from before
+// subjects, which answers 404 to the route itself). Cached briefly and shared,
+// in flight too: a page open asks for its header line and its Community tab at
+// once.
+//
+// Anonymous unless `asMember`: the header line, the Now Playing item and the
+// seek-bar ticks look songs up as they play, and with a token attached the
+// server could tie every song played to the signed-in account. Only the
+// Community tab — which the user opened, and which shows whether they like it —
+// asks as a member. The two are cached apart, since only one carries `liked`.
+function resolveSubject(kind, name, artist, fresh, asMember) {
+  var member = !!(asMember && state.token);
+  var key = (member ? "member|" : "") + lookupKey(kind, name, artist);
+  var hit = state.subjectLookups[key];
+  if (!fresh && hit && Date.now() - hit.at < SUBJECT_TTL_MS) return hit.promise;
+  var q = kind === "track" ? { kind: kind, title: name, artist: artist } : kind === "album" ? { kind: kind, name: name, artist: artist } : { kind: kind, name: name };
+  var promise = request("GET", "/v1/subjects/resolve?" + queryString(q), undefined, member)
     .then(function (data) {
-      return (data && data.subject && data.subject.counts) || {};
+      var s = (data && data.subject) || null;
+      if (s) state.subjectsById[s.id] = s;
+      return s;
     })
     .catch(function (e) {
-      if (e && e.status === 404) return {};
+      if (e && e.status === 404) return null;
+      delete state.subjectLookups[key];
       throw e;
-    })
-    .then(function (counts) {
-      state.songCounts[key] = { at: Date.now(), counts: counts };
-      return counts;
     });
+  state.subjectLookups[key] = { at: Date.now(), promise: promise };
+  return promise;
+}
+
+function forgetSubject(kind, name, artist) {
+  var key = lookupKey(kind, name, artist);
+  delete state.subjectLookups[key];
+  delete state.subjectLookups["member|" + key];
+}
+
+// { [kind]: n } for one song; {} when nothing is shared.
+function songCounts(title, artist) {
+  return resolveSubject("track", title, artist).then(function (s) {
+    return s ? Object.assign({}, s.counts || {}, s.likes ? { _likes: s.likes } : {}) : {};
+  });
 }
 
 // The counts in the server's module order, named the way the module names
@@ -919,7 +987,7 @@ function countParts(counts) {
     return m.kind;
   });
   Object.keys(counts || {}).forEach(function (k) {
-    if (kinds.indexOf(k) < 0) kinds.push(k);
+    if (kinds.indexOf(k) < 0 && k.charAt(0) !== "_") kinds.push(k);
   });
   kinds.forEach(function (kind) {
     var n = Number(counts && counts[kind]);
@@ -944,16 +1012,18 @@ function countsText(counts) {
   );
 }
 
-// The track page's header line (`title_line`): "2 cue sheets · 1 lyric sheet
-// on Community", or null for none.
+// The track page's header line (`title_line`): "♥ 128 · 2 cue sheets · 1 lyric
+// sheet on Community", or null for none.
 function countsTitleLine(counts) {
   var parts = countParts(counts);
-  if (!parts.length) return null;
-  return {
-    items: parts.map(function (p, i) {
-      return { value: p.n, label: p.noun + (i === parts.length - 1 ? " on Community" : "") };
-    }),
-  };
+  var likes = Number(counts && counts._likes) || 0;
+  if (!parts.length && !likes) return null;
+  var items = parts.map(function (p) {
+    return { value: p.n, label: p.noun };
+  });
+  if (likes) items.unshift({ value: "♥ " + likes, label: "" });
+  items[items.length - 1].label += (items[items.length - 1].label ? " " : "") + "on Community";
+  return { items: items };
 }
 
 function registerSongCounts() {
@@ -991,33 +1061,6 @@ function registerSongCounts() {
 // ---------------------------------------------------------------------------
 // Cue sheets
 // ---------------------------------------------------------------------------
-
-function cueModule() {
-  return knownModule("cue_sheet");
-}
-
-function loadSong(song) {
-  state.song = song;
-  state.songItems = null;
-  if (!song) return Promise.resolve(render());
-  return withLoading(function () {
-    return request("GET", "/v1/items?" + queryString({ kind: "cue_sheet", title: song.title, artist: song.artist })).then(function (data) {
-      state.songItems = data.items;
-    });
-  });
-}
-
-function currentSong() {
-  var t = api.playback && api.playback.getCurrentTrack ? api.playback.getCurrentTrack() : null;
-  return t && t.title ? { title: t.title, artist: t.artist_name || null } : null;
-}
-
-// Narrow the cue sheets to one song (context menu, share link).
-function showSong(song) {
-  state.tab = "cue_sheet";
-  state.cueScope = "song";
-  return loadSong(song);
-}
 
 // Import a community sheet. Asks first when it would replace a local sheet
 // that isn't this same item, untouched.
@@ -1074,6 +1117,33 @@ function sharedSheet(key) {
   return null;
 }
 
+// The album artist of a song's album, so a compilation track files under
+// "Various Artists" — the album the app's own album page asks about — rather
+// than under its performer. The playing track carries it; otherwise the
+// library copy does. Null when neither knows (the server then uses the
+// track's artist, as before).
+function albumArtistFor(title, artist, album) {
+  if (!album) return Promise.resolve(null);
+  var want = songKey(title, artist);
+  var now = api.playback && typeof api.playback.getCurrentTrack === "function" ? api.playback.getCurrentTrack() : null;
+  if (now && songKey(now.title, now.artist_name) === want && fold(now.album_title) === fold(album)) {
+    return Promise.resolve(now.album_artist_name || null);
+  }
+  if (!api.library || typeof api.library.ftsTracks !== "function") return Promise.resolve(null);
+  return api.library
+    .ftsTracks(title, { limit: 25 })
+    .then(function (rows) {
+      var hit = (rows || []).filter(function (t) {
+        return songKey(t.title, t.artist_name) === want && fold(t.album_title) === fold(album);
+      })[0];
+      return (hit && hit.album_artist_name) || null;
+    })
+    .catch(function (e) {
+      api.log("warn", "Couldn't look up the album artist of “" + title + "”: " + errorText(e));
+      return null;
+    });
+}
+
 function publishSong(title, artist) {
   if (!requireSignIn("publish")) return Promise.resolve();
   return api.cues
@@ -1089,20 +1159,23 @@ function publishSong(title, artist) {
         notify("This sheet came from the community unchanged, so it isn't yours to publish.");
         return;
       }
-      return request(
-        "POST",
-        "/v1/items",
-        {
-          kind: "cue_sheet",
-          title: row.title,
-          artistName: row.artistName,
-          albumName: row.albumName,
-          durationSecs: row.durationSecs,
-          author: row.author,
-          sheet: row.sheet,
-        },
-        true
-      ).then(function (data) {
+      return albumArtistFor(row.title, row.artistName, row.albumName).then(function (albumArtist) {
+        return request(
+          "POST",
+          "/v1/items",
+          {
+            kind: "cue_sheet",
+            title: row.title,
+            artistName: row.artistName,
+            albumName: row.albumName,
+            albumArtistName: albumArtist || undefined,
+            durationSecs: row.durationSecs,
+            author: row.author,
+            sheet: row.sheet,
+          },
+          true
+        );
+      }).then(function (data) {
         var list = (state.shared.cue_sheet || []).filter(function (it) {
           return it.id !== data.item.id;
         });
@@ -1141,7 +1214,7 @@ function localByKey(key) {
   return null;
 }
 
-// One local sheet → a row in Mine, given what the user published and imported.
+// One local sheet → a row on You, given what the user published and imported.
 function localRow(sheet, published, imported) {
   var key = songKey(sheet.title, sheet.artistName);
   var cues = (sheet.sheet && sheet.sheet.cues) || [];
@@ -1161,17 +1234,6 @@ function localRow(sheet, published, imported) {
     row.actions = ["publish"];
   }
   return row;
-}
-
-function songNodes() {
-  if (!state.song) {
-    return [{ type: "text", content: "Play a song, or right-click a track and choose “Find shared cue sheets”." }];
-  }
-  var nodes = [{ type: "text", content: (state.song.artist ? state.song.artist + " — " : "") + state.song.title, className: "ds-heading" }];
-  if (state.loading && !state.songItems) nodes.push({ type: "loading", message: "Looking in the community…" });
-  else if (state.songItems && state.songItems.length === 0) nodes.push({ type: "text", content: "Nobody has shared a cue sheet for this song yet." });
-  else if (state.songItems) nodes.push(listNode(cueModule(), state.songItems));
-  return nodes;
 }
 
 function mySheetNodes() {
@@ -1200,8 +1262,8 @@ function mySheetNodes() {
   ];
 }
 
-// A share link (viboplr://plugin/community/open?id=…). A cue sheet shows its
-// song and asks to import; a mixtape opens its tab and asks to save.
+// A share link (viboplr://plugin/community/open?id=…). A cue sheet or synced
+// lyrics ask to import (in Discover); a mixtape opens its tab and asks to save.
 function openShared(id) {
   if (!id) return Promise.resolve();
   api.ui.navigateToView(VIEW);
@@ -1213,12 +1275,14 @@ function openShared(id) {
         state.confirm = { kind: "save-mixtape", id: item.id, title: item.title, by: item.publisher.login, count: payloadTracks(item).length };
         return loadTab();
       }
-      if (item.kind === "synced_lyrics") {
-        state.confirm = { kind: "import-lyrics", id: item.id, title: item.title, artist: item.artistName, by: item.publisher.login };
-        return findLyrics(item.title, item.artistName);
-      }
-      state.confirm = { kind: "import", id: item.id, title: item.title, artist: item.artistName, by: item.publisher.login };
-      return showSong({ title: item.title, artist: item.artistName });
+      state.confirm = {
+        kind: item.kind === "synced_lyrics" ? "import-lyrics" : "import",
+        id: item.id,
+        title: item.title,
+        artist: item.artistName,
+        by: item.publisher.login,
+      };
+      return switchTab(DISCOVER);
     })
     .catch(function (e) {
       if (e && e.status === 404) notify("That isn't in the community any more.");
@@ -1273,8 +1337,9 @@ function lyricsSource(value) {
 }
 
 // Import community lyrics. Asks first when the song already has synced lyrics
-// that didn't come from this same item.
-function importLyrics(id, confirmed) {
+// that didn't come from this same item — in the view, or through `ask(confirm)`
+// when the caller shows the question somewhere else (the Community tab).
+function importLyrics(id, confirmed, ask) {
   if (!canSaveLyrics()) {
     notify("Importing synced lyrics needs Viboplr 1.0.94 or later.");
     return Promise.resolve();
@@ -1292,7 +1357,7 @@ function importLyrics(id, confirmed) {
       var check = confirmed || ours ? Promise.resolve(null) : currentLyrics(item.title, item.artistName);
       return check.then(function (existing) {
         if (existing && existing.kind === "synced" && !confirmed) {
-          state.confirm = {
+          var question = {
             kind: "replace-lyrics",
             id: item.id,
             title: item.title,
@@ -1300,7 +1365,11 @@ function importLyrics(id, confirmed) {
             by: item.publisher.login,
             from: lyricsSource(existing),
           };
-          render();
+          if (ask) ask(question);
+          else {
+            state.confirm = question;
+            render();
+          }
           return;
         }
         return api.lyrics
@@ -1377,7 +1446,10 @@ function publishLyrics(title, artist, album) {
       var body = { kind: "synced_lyrics", title: title, artistName: artist || undefined, albumName: album || undefined, lrc: value.text };
       var now = api.playback && api.playback.getCurrentTrack ? api.playback.getCurrentTrack() : null;
       if (now && songKey(now.title, now.artist_name) === songKey(title, artist) && now.duration_secs) body.durationSecs = now.duration_secs;
-      return request("POST", "/v1/items", body, true).then(function (data) {
+      return albumArtistFor(title, artist, album).then(function (albumArtist) {
+        if (albumArtist) body.albumArtistName = albumArtist;
+        return request("POST", "/v1/items", body, true);
+      }).then(function (data) {
         var list = (state.shared.synced_lyrics || []).filter(function (it) {
           return it.id !== data.item.id;
         });
@@ -1408,14 +1480,6 @@ function unpublishLyrics(key) {
     .catch(function (e) {
       fail("Couldn't unpublish", e);
     });
-}
-
-// Search the Synced lyrics tab for one song (context menu).
-function findLyrics(title, artist) {
-  state.tab = "synced_lyrics";
-  state.error = null;
-  browseState("synced_lyrics").query = (artist ? artist + " " : "") + title;
-  return loadList("synced_lyrics", 0);
 }
 
 function myLyricsNodes() {
@@ -1462,7 +1526,7 @@ function myLyricsNodes() {
   ];
 }
 
-// A Mine row id → its song key and which list it came from.
+// A row id on You → its song key and which list it came from.
 function lyricsRowKey(id) {
   var s = String(id || "");
   var i = s.indexOf(":");
@@ -1711,7 +1775,7 @@ function unpublishMixtape(name) {
     });
 }
 
-// One saved playlist → a row in Mine, given what the user published.
+// One saved playlist → a row on You, given what the user published.
 function playlistRow(playlist, published) {
   var bits = [plural(playlist.trackCount || 0, "track", "tracks")];
   var row = { id: String(playlist.id), title: playlist.name, subtitle: "", actions: [] };
@@ -1741,7 +1805,7 @@ function isSpecialPlaylist(p) {
   return !m && SPECIAL_PLAYLIST_NAMES.indexOf(p && p.name) !== -1;
 }
 
-// The playlists Mine offers: the user's own. Never a special one, and never an
+// The playlists You offers: the user's own. Never a special one, and never an
 // empty one — unless it is already published, so it can still be unpublished.
 function minePlaylists() {
   return (state.playlists || []).filter(function (p) {
@@ -1809,6 +1873,829 @@ function addServer(id) {
       else if (e && e.status === 401) notify("Sign in to Viboplr Community to add a shared Subsonic server.");
       else fail("Couldn't add that server", e);
     });
+}
+
+// ---------------------------------------------------------------------------
+// Opening Viboplr's own pages
+// ---------------------------------------------------------------------------
+
+// A song, album or artist page in Viboplr, on its Community tab. Something not
+// in the library still gets its page, built from the name. Older apps open the
+// page without choosing the tab.
+function openInApp(kind, name, artistName, albumTitle) {
+  if (!name) return;
+  var ref = { name: name };
+  if (artistName) ref.artistName = artistName;
+  if (albumTitle) ref.albumTitle = albumTitle;
+  if (typeof api.ui.navigateToEntity === "function") {
+    api.ui.navigateToEntity(kind, ref, { tab: TAB_TYPES[kind] });
+    return;
+  }
+  api.ui.requestAction("navigate-to-" + kind, ref);
+}
+
+function openSubject(s) {
+  if (s) openInApp(s.kind, s.name, s.kind === "artist" ? null : s.artistName);
+}
+
+// viboplr://plugin/community/subject?id=… — the website's "Open in Viboplr".
+function openSubjectLink(id) {
+  if (!id) return Promise.resolve();
+  return request("GET", "/v1/subjects/" + encodeURIComponent(id))
+    .then(function (data) {
+      state.subjectsById[data.subject.id] = data.subject;
+      openSubject(data.subject);
+    })
+    .catch(function (e) {
+      if (e && e.status === 404) notify("That isn't on Viboplr Community any more.");
+      else fail("Couldn't open that link", e);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Discover: search + what's new
+// ---------------------------------------------------------------------------
+
+var KIND_LABELS = { track: "Song", album: "Album", artist: "Artist" };
+
+function ago(ts) {
+  var d = Math.max(0, Math.floor(Date.now() / 1000) - Number(ts || 0));
+  if (d < 60) return "just now";
+  if (d < 3600) return Math.floor(d / 60) + " min";
+  if (d < 86400) return Math.floor(d / 3600) + " h";
+  return Math.floor(d / 86400) + " d";
+}
+
+// "2 cue sheets · 3 comments · ♥ 12" for a subject.
+function subjectFacts(s) {
+  var bits = countParts(s.counts).map(function (p) {
+    return p.n + " " + p.noun;
+  });
+  if (s.comments) bits.push(plural(s.comments, "comment", "comments"));
+  if (s.likes) bits.push("♥ " + s.likes);
+  return bits;
+}
+
+function subjectRow(s) {
+  var lead = [KIND_LABELS[s.kind] || s.kind];
+  if (s.kind !== "artist" && s.artistName) lead.push(s.artistName);
+  return {
+    id: "subject:" + s.id,
+    title: s.name,
+    subtitle: lead.concat(subjectFacts(s)).join(" · "),
+    artistName: s.kind === "artist" ? s.name : s.artistName || null,
+    albumTitle: s.kind === "album" ? s.name : null,
+    action: "open-subject",
+  };
+}
+
+// Only the latest search lands: an earlier one answering late (or failing)
+// must not put its results, or its error, under the query typed since.
+function searchSubjects(query) {
+  var d = state.discover;
+  var seq = (d.seq = (d.seq || 0) + 1);
+  d.query = String(query || "").trim();
+  if (!d.query) {
+    d.results = null;
+    return Promise.resolve(render());
+  }
+  return withLoading(function () {
+    return request("GET", "/v1/subjects/search?" + queryString({ q: d.query })).then(
+      function (data) {
+        if (seq !== d.seq) return;
+        d.results = data.subjects || [];
+        d.results.forEach(function (s) {
+          state.subjectsById[s.id] = s;
+        });
+      },
+      function (e) {
+        if (seq === d.seq) throw e;
+        api.log("debug", "A superseded Community search failed: " + errorText(e));
+      }
+    );
+  });
+}
+
+function loadFeed(page) {
+  var d = state.discover;
+  return request("GET", "/v1/activity?" + queryString({ page: page || 0 }), undefined, !!state.token).then(function (data) {
+    var entries = data.entries || [];
+    entries.forEach(function (e) {
+      if (e.subject) state.subjectsById[e.subject.id] = e.subject;
+    });
+    d.feed = page > 0 && d.feed ? d.feed.concat(entries) : entries;
+    d.feedPage = page || 0;
+    d.feedMore = !!data.hasMore;
+  });
+}
+
+function loadDiscover() {
+  return withLoading(function () {
+    return loadFeed(0);
+  });
+}
+
+// One feed entry → a row: who did what, and where it opens.
+function feedRow(e, i) {
+  var s = e.subject;
+  var who;
+  var what;
+  if (e.type === "comment") {
+    who = e.comment.author.login;
+    what = "commented: “" + String(e.comment.body).slice(0, 120) + "”";
+  } else {
+    var m = knownModule(e.item.kind) || { singular: "item" };
+    who = e.item.publisher.login;
+    what = (e.event === "updated" ? "updated " : "shared ") + (s ? "a " + m.singular : "the " + m.singular);
+  }
+  var title = s ? s.name + (s.kind !== "artist" && s.artistName ? " · " + s.artistName : "") : e.item ? e.item.title : "";
+  return {
+    id: "entry:" + i,
+    title: title,
+    subtitle: "@" + who + " " + what + " · " + ago(e.at),
+    artistName: s ? (s.kind === "artist" ? s.name : s.artistName || null) : null,
+    albumTitle: s && s.kind === "album" ? s.name : null,
+    action: "open-entry",
+  };
+}
+
+function rowsNode(items, actions) {
+  return {
+    type: "track-row-list",
+    selectable: true,
+    selectionMode: "single",
+    openOnClick: true,
+    artwork: "cached",
+    contextMenu: false,
+    actions: withIcons(actions || []),
+    items: items,
+  };
+}
+
+function discoverNodes() {
+  var d = state.discover;
+  var nodes = [{ type: "search-input", placeholder: "Find an artist, album or song on Community", action: "discover-search", value: d.query, submitOnly: true, buttonLabel: "Search" }];
+  if (d.query && d.results) {
+    var groups = [
+      ["artist", "Artists"],
+      ["album", "Albums"],
+      ["track", "Songs"],
+    ];
+    var any = false;
+    groups.forEach(function (g) {
+      var rows = d.results.filter(function (s) {
+        return s.kind === g[0];
+      });
+      if (!rows.length) return;
+      any = true;
+      nodes.push({ type: "section", title: g[1], children: [rowsNode(rows.map(subjectRow))] });
+    });
+    if (!any) nodes.push({ type: "text", content: "Nothing shared matches that yet." });
+  }
+  var feed = [];
+  if (!d.feed && state.loading) feed.push({ type: "loading", message: "Loading what's new…" });
+  else if (d.feed && !d.feed.length) feed.push({ type: "text", content: "Nothing shared yet." });
+  else if (d.feed) {
+    feed.push(rowsNode(d.feed.map(feedRow)));
+    if (d.feedMore) feed.push({ type: "button", label: state.loading ? "Loading…" : "Load more", action: "feed-more", variant: "secondary", disabled: state.loading });
+  }
+  nodes.push({ type: "section", title: "New this week", children: feed });
+  nodes.push({
+    type: "text",
+    className: "ds-muted",
+    content: "Opening a song, album or artist goes to its page in Viboplr, on its Community tab — songs you don't have get a page too, built from their name.",
+  });
+  return nodes;
+}
+
+function openEntry(i) {
+  var e = state.discover.feed && state.discover.feed[i];
+  if (!e) return Promise.resolve();
+  if (e.subject) {
+    openSubject(e.subject);
+    return Promise.resolve();
+  }
+  if (e.item && e.item.kind === "mixtape") return playMixtape(e.item.id);
+  if (e.item && e.item.kind === "subsonic_server") return addServer(e.item.id);
+  return e.item ? api.network.openUrl(e.item.url) : Promise.resolve();
+}
+
+// ---------------------------------------------------------------------------
+// The Community tab on song, album and artist pages
+// ---------------------------------------------------------------------------
+//
+// A `plugin_view` information type: the page's tab is drawn from the tree this
+// returns, and its buttons reach the ACTIONS below with the page's entity in the
+// payload. After a like or a post the tab is redrawn in place with
+// api.informationTypes.setSectionData — no refetch of the whole page.
+
+var COMMENT_ACTIONS = [
+  { id: "tab-comment-like", label: "Like" },
+  { id: "tab-comment-unlike", label: "Unlike" },
+  { id: "tab-comment-delete", label: "Delete" },
+  { id: "tab-comment-report", label: "Report" },
+];
+var ACTION_ICONS_TAB = { "tab-comment-like": "♡", "tab-comment-unlike": "♥", "tab-comment-delete": "✕", "tab-comment-report": "⚑" };
+
+function tabKey(entity) {
+  return entity.kind + ":" + (entity.kind === "artist" ? "" : fold(entity.artistName)) + ":" + fold(entity.name);
+}
+
+function entityOf(p) {
+  var e = p && p.entity;
+  return e && e.kind && e.name ? { kind: e.kind, name: e.name, artistName: e.artistName || null, albumTitle: e.albumTitle || null } : null;
+}
+
+// The tab an action came from, loaded if this plugin has never seen it: the
+// host draws a tab from its own cache while that is fresh (the manifest `ttl`),
+// across restarts and plugin reloads, without asking onFetch — so the tab on
+// screen can be one `state.tabs` knows nothing about. Null only for a payload
+// that names no entity.
+function ensureTab(p) {
+  var e = entityOf(p);
+  if (!e) return Promise.resolve(null);
+  var key = tabKey(e);
+  if (state.tabs[key]) return Promise.resolve(state.tabs[key]);
+  return loadTabData(e).then(function (data) {
+    state.tabs[key] = data;
+    return data;
+  });
+}
+
+// A tab action, run on the tab's state. A failed load is said, not swallowed:
+// the button the user pressed would otherwise just do nothing.
+function withTab(p, run) {
+  return ensureTab(p).then(
+    function (t) {
+      return t ? run(t) : undefined;
+    },
+    function (e) {
+      fail("Couldn't load the Community tab", e);
+    }
+  );
+}
+
+function fmtMoment(secs) {
+  var s = Math.max(0, Math.floor(Number(secs) || 0));
+  var h = Math.floor(s / 3600);
+  var m = Math.floor((s % 3600) / 60);
+  var r = s % 60;
+  var mm = h ? (m < 10 ? "0" : "") + m : String(m);
+  return (h ? h + ":" : "") + mm + ":" + (r < 10 ? "0" : "") + r;
+}
+
+// The playing track, when it is the song this tab is about.
+function playingHere(entity) {
+  if (!entity || entity.kind !== "track" || !api.playback || typeof api.playback.getCurrentTrack !== "function") return null;
+  var t = api.playback.getCurrentTrack();
+  return t && songKey(t.title, t.artist_name) === songKey(entity.name, entity.artistName) ? t : null;
+}
+
+// Everything the tab shows, fetched together. A subject nobody ever shared
+// anything about is null: the tab still shows, inviting the first share.
+function loadTabData(entity) {
+  var key = tabKey(entity);
+  var prev = state.tabs[key];
+  return resolveSubject(entity.kind, entity.name, entity.artistName, true, true).then(function (subject) {
+    var data = {
+      entity: entity,
+      subject: subject,
+      cues: null,
+      lyrics: null,
+      comments: [],
+      commentsMore: false,
+      children: null,
+      localSheet: false,
+      at: prev ? prev.at : null,
+      confirm: null,
+      fetchedAt: Date.now(),
+    };
+    var loads = [];
+    if (entity.kind === "track") {
+      loads.push(
+        api.cues
+          .get(entity.name, entity.artistName)
+          .then(function (row) {
+            data.localSheet = !!row;
+          })
+          .catch(function (e) {
+            // Only decides whether "Publish my cue sheet" shows.
+            api.log("warn", "Couldn't read the cue sheet for " + entity.name + ": " + errorText(e));
+            data.localSheet = false;
+          })
+      );
+    }
+    if (!subject) return Promise.all(loads).then(function () {
+      return data;
+    });
+    var id = encodeURIComponent(subject.id);
+    loads.push(
+      request("GET", "/v1/subjects/" + id + "/comments", undefined, !!state.token).then(function (d) {
+        data.comments = d.comments || [];
+        data.commentsMore = !!d.hasMore;
+      })
+    );
+    if (entity.kind === "track") {
+      var q = { title: entity.name, artist: entity.artistName };
+      if ((subject.counts || {}).cue_sheet) {
+        loads.push(
+          request("GET", "/v1/items?" + queryString(Object.assign({ kind: "cue_sheet" }, q))).then(function (d) {
+            data.cues = d.items;
+          })
+        );
+      }
+      if ((subject.counts || {}).synced_lyrics) {
+        loads.push(
+          request("GET", "/v1/items?" + queryString(Object.assign({ kind: "synced_lyrics" }, q))).then(function (d) {
+            data.lyrics = d.items;
+          })
+        );
+      }
+    } else {
+      loads.push(
+        request("GET", "/v1/subjects/" + id + "/children").then(function (d) {
+          data.children = d;
+          (d.tracks || []).concat(d.albums || []).forEach(function (s) {
+            state.subjectsById[s.id] = s;
+          });
+        })
+      );
+    }
+    return Promise.all(loads).then(function () {
+      return data;
+    });
+  });
+}
+
+function likeButton(subject) {
+  if (!subject) return null;
+  var n = subject.likes || 0;
+  if (!state.token) return { type: "button", label: "♡ Like · " + n, action: "tab-sign-in", variant: "secondary" };
+  return { type: "button", label: (subject.liked ? "♥ Liked · " : "♡ Like · ") + n, action: "tab-like", variant: subject.liked ? "accent" : "secondary" };
+}
+
+function commentRows(data) {
+  var me = state.user && state.user.login;
+  return data.comments.map(function (c) {
+    var bits = ["@" + c.author.login];
+    if (c.atSecs !== null && c.atSecs !== undefined) bits.push("at " + fmtMoment(c.atSecs));
+    bits.push(ago(c.createdAt));
+    if (c.likes) bits.push("♥ " + c.likes);
+    var actions = [];
+    if (state.token) actions.push(c.liked ? "tab-comment-unlike" : "tab-comment-like");
+    actions.push(me && c.author.login === me ? "tab-comment-delete" : "tab-comment-report");
+    return {
+      id: "comment:" + c.id,
+      title: c.body,
+      subtitle: bits.join(" · "),
+      imageUrl: c.author.avatarUrl || undefined,
+      actions: actions,
+    };
+  });
+}
+
+function commentNodes(data) {
+  var e = data.entity;
+  var nodes = [];
+  if (!data.subject) return nodes;
+  if (state.token) {
+    // A new stateKey after each post empties the box (the host keeps typed
+    // text per key, and reads `value` only for a key it hasn't seen). A count
+    // that only grows, so a deleted comment can't bring an old key — and the
+    // text kept under it — back.
+    var composer = [
+      {
+        type: "search-input",
+        placeholder: "Comment on " + e.name,
+        action: "tab-comment",
+        value: "",
+        stateKey: "comment:" + state.commentsPosted,
+        submitOnly: true,
+        buttonLabel: "Post",
+      },
+    ];
+    if (e.kind === "track") {
+      var here = playingHere(e);
+      if (data.at !== null && data.at !== undefined) {
+        composer.push({ type: "button", label: "at " + fmtMoment(data.at) + " ✕", action: "tab-comment-at", variant: "accent" });
+      } else if (here) {
+        var pos = typeof api.playback.getPosition === "function" ? api.playback.getPosition() : 0;
+        composer.push({ type: "button", label: "@ " + fmtMoment(pos), action: "tab-comment-at", variant: "secondary" });
+      }
+    }
+    nodes.push({ type: "layout", direction: "horizontal", children: composer });
+  } else {
+    nodes.push(banner("Sign in with GitHub to comment and like.", "muted", [{ type: "button", label: "Sign in", action: "tab-sign-in", variant: "accent" }]));
+  }
+  if (!data.comments.length) nodes.push({ type: "text", content: "No comments yet.", className: "ds-muted" });
+  else {
+    nodes.push({
+      type: "track-row-list",
+      selectable: true,
+      selectionMode: "single",
+      contextMenu: false,
+      actions: COMMENT_ACTIONS.map(function (a) {
+        return Object.assign({}, a, { icon: ACTION_ICONS_TAB[a.id] });
+      }),
+      items: commentRows(data),
+    });
+    if (data.commentsMore) nodes.push({ type: "button", label: "More comments on the website", action: "tab-page", variant: "secondary" });
+  }
+  return nodes;
+}
+
+// A shared item list in the tab: the module's own row (Imported / Update
+// badges), with the tab's import actions.
+function tabItems(kind, items, localSheet) {
+  var m = knownModule(kind);
+  var importId = kind === "cue_sheet" ? "tab-import" : "tab-import-lyrics";
+  return {
+    type: "track-row-list",
+    selectable: true,
+    selectionMode: "single",
+    artwork: "cached",
+    contextMenu: false,
+    actions: withIcons([
+      { id: importId, label: kind === "cue_sheet" && localSheet ? "Use instead of yours" : "Import", icon: "⬇" },
+      { id: kind === "cue_sheet" ? "tab-update" : "tab-update-lyrics", label: "Update", icon: "↻" },
+      { id: "page", label: "Open page" },
+    ]),
+    items: items.map(function (item) {
+      var row = cardRow(m, item);
+      row.actions = row.actions.map(function (a) {
+        if (a === "import" || a === "import-lyrics") return importId;
+        if (a === "update") return "tab-update";
+        if (a === "update-lyrics") return "tab-update-lyrics";
+        return a;
+      });
+      return row;
+    }),
+  };
+}
+
+function childRows(list) {
+  return rowsNode(list.map(subjectRow));
+}
+
+function tabTree(data) {
+  var e = data.entity;
+  var s = data.subject;
+  var noun = e.kind === "track" ? "song" : e.kind;
+  var top = [];
+  var like = likeButton(s);
+  if (like) top.push(like);
+  if (s) top.push({ type: "button", label: "Open the " + noun + "'s page", action: "tab-page", variant: "secondary" });
+  if (e.kind === "track" && state.token) {
+    if (data.localSheet) top.push({ type: "button", label: "Publish my cue sheet", action: "tab-publish-sheet", variant: "secondary" });
+    top.push({ type: "button", label: "Publish my synced lyrics", action: "tab-publish-lyrics", variant: "secondary" });
+  }
+  var children = [];
+  // A question the tab asked (replace the song's synced lyrics?) comes first,
+  // where the button that raised it was pressed.
+  if (data.confirm) {
+    children.push(Object.assign({}, confirmNode(data.confirm), { confirmAction: "tab-confirm-replace-lyrics", cancelAction: "tab-cancel-confirm" }));
+  }
+  if (top.length) children.push({ type: "layout", direction: "horizontal", children: top });
+  if (!s) {
+    children.push({
+      type: "text",
+      content:
+        "Nothing on Viboplr Community about this " + noun + " yet." +
+        (e.kind === "track" ? " Publish your cue sheet or synced lyrics for it and it gets a page others can like and comment on." : ""),
+    });
+    if (!state.token && e.kind === "track") children.push(banner("Sign in with GitHub to share.", "muted", [{ type: "button", label: "Sign in", action: "tab-sign-in", variant: "accent" }]));
+    return { type: "layout", direction: "vertical", children: children };
+  }
+  if (e.kind === "track") {
+    if (data.cues && data.cues.length) children.push({ type: "section", title: "Cue sheets · " + data.cues.length, children: [tabItems("cue_sheet", data.cues, data.localSheet)] });
+    if (data.lyrics && data.lyrics.length) children.push({ type: "section", title: "Synced lyrics · " + data.lyrics.length, children: [tabItems("synced_lyrics", data.lyrics)] });
+  } else {
+    var kids = data.children || {};
+    if (e.kind === "album" && kids.tracks && kids.tracks.length) children.push({ type: "section", title: "What's shared per track", children: [childRows(kids.tracks)] });
+    if (e.kind === "artist" && kids.albums && kids.albums.length) children.push({ type: "section", title: "Albums", children: [childRows(kids.albums)] });
+    if (e.kind === "artist" && kids.tracks && kids.tracks.length) children.push({ type: "section", title: "Songs with something shared", children: [childRows(kids.tracks)] });
+  }
+  children.push({ type: "section", title: "Comments · " + (s.comments || data.comments.length), children: commentNodes(data) });
+  return { type: "layout", direction: "vertical", children: children };
+}
+
+// Redraw an open tab: from what we have (`reload` false — a like), or after
+// asking the server again (a post, an import).
+function refreshTab(entity, reload) {
+  var key = tabKey(entity);
+  var ready = reload || !state.tabs[key] ? loadTabData(entity) : Promise.resolve(state.tabs[key]);
+  return ready
+    .then(function (data) {
+      state.tabs[key] = data;
+      if (api.informationTypes && typeof api.informationTypes.setSectionData === "function") {
+        return api.informationTypes.setSectionData(TAB_TYPES[entity.kind], entity, tabTree(data));
+      }
+    })
+    .catch(function (e) {
+      api.log("warn", "Couldn't refresh the Community tab: " + errorText(e));
+    });
+}
+
+// How long the host keeps a tab's tree (the manifest's `ttl` on the three
+// community_* types). A tab older than this is redrawn by the host itself, by
+// asking onFetch again.
+var TAB_TTL_MS = 300 * 1000;
+
+// Signing in or out changes what every tab shows — the like button, the
+// comment box, whose comments can be deleted, `liked` itself — but the host
+// keeps drawing the tree it cached. So each tab the host may still be showing
+// from that cache is redrawn: from what we have after a sign-out (a signed-out
+// tree reads nothing member-only), asked again after a sign-in (only the member
+// answer carries `liked`). Older ones are dropped; the host asks for them anew.
+function redrawTabs(signedIn) {
+  var now = Date.now();
+  return Promise.all(
+    Object.keys(state.tabs).map(function (k) {
+      var t = state.tabs[k];
+      if (now - t.fetchedAt > TAB_TTL_MS) {
+        delete state.tabs[k];
+        return null;
+      }
+      return refreshTab(t.entity, signedIn);
+    })
+  );
+}
+
+function registerTabs() {
+  if (!api.informationTypes || typeof api.informationTypes.onFetch !== "function") return;
+  Object.keys(TAB_TYPES).forEach(function (kind) {
+    api.informationTypes.onFetch(TAB_TYPES[kind], function (entity) {
+      if (!entity || !entity.name) return Promise.resolve({ status: "not_found" });
+      var e = { kind: kind, name: entity.name, artistName: entity.artistName || null, albumTitle: entity.albumTitle || null };
+      return loadTabData(e)
+        .then(function (data) {
+          state.tabs[tabKey(e)] = data;
+          return { status: "ok", value: tabTree(data) };
+        })
+        .catch(function (err) {
+          api.log("warn", "Couldn't load the Community tab: " + errorText(err));
+          return { status: "error" };
+        });
+    });
+  });
+}
+
+function itemIdOf(p, prefix) {
+  var id = rowId(p);
+  if (typeof id !== "string") return null;
+  return prefix && id.indexOf(prefix) === 0 ? id.slice(prefix.length) : id;
+}
+
+var TAB_ACTIONS = {
+  "tab-sign-in": function () {
+    return signIn();
+  },
+  "tab-page": function (p) {
+    return withTab(p, function (t) {
+      return api.network.openUrl(t.subject ? t.subject.url : SERVER);
+    });
+  },
+  "tab-like": function (p) {
+    if (!requireSignIn("like")) return Promise.resolve();
+    return withTab(p, function (t) {
+      if (!t.subject) return;
+      var on = !t.subject.liked;
+      return request(on ? "PUT" : "DELETE", "/v1/subjects/" + encodeURIComponent(t.subject.id) + "/like", undefined, true)
+        .then(function (d) {
+          t.subject = Object.assign({}, t.subject, { likes: d.likes, liked: d.liked });
+          forgetSubject(t.entity.kind, t.entity.name, t.entity.artistName);
+          return refreshTab(t.entity, false);
+        })
+        .catch(function (e) {
+          fail("Couldn't like that", e);
+        });
+    });
+  },
+  "tab-comment": function (p) {
+    var body = String((p && p.query) || "").trim();
+    if (!body || !requireSignIn("comment")) return Promise.resolve();
+    return withTab(p, function (t) {
+      if (!t.subject) return;
+      var payload = { body: body };
+      if (t.at !== null && t.at !== undefined) payload.atSecs = t.at;
+      return request("POST", "/v1/subjects/" + encodeURIComponent(t.subject.id) + "/comments", payload, true)
+        .then(function () {
+          t.at = null;
+          state.commentsPosted++;
+          retick(t.entity);
+          return refreshTab(t.entity, true);
+        })
+        .catch(function (e) {
+          fail("Couldn't post that comment", e);
+        });
+    });
+  },
+  // Pin the comment to where the song is now (or unpin it).
+  "tab-comment-at": function (p) {
+    return withTab(p, function (t) {
+      if (t.at !== null && t.at !== undefined) t.at = null;
+      else if (playingHere(t.entity)) t.at = Math.floor(typeof api.playback.getPosition === "function" ? api.playback.getPosition() : 0);
+      else {
+        notify("Play the song to pin a comment to a moment of it.");
+        return;
+      }
+      return refreshTab(t.entity, false);
+    });
+  },
+  "tab-comment-like": function (p) {
+    return likeComment(p, true);
+  },
+  "tab-comment-unlike": function (p) {
+    return likeComment(p, false);
+  },
+  "tab-comment-delete": function (p) {
+    var id = itemIdOf(p, "comment:");
+    if (!id) return Promise.resolve();
+    return withTab(p, function (t) {
+      return request("DELETE", "/v1/comments/" + encodeURIComponent(id), undefined, true)
+        .then(function () {
+          retick(t.entity);
+          return refreshTab(t.entity, true);
+        })
+        .catch(function (e) {
+          fail("Couldn't delete that comment", e);
+        });
+    });
+  },
+  // Reporting asks for a reason, which the website's form collects.
+  "tab-comment-report": function (p) {
+    var id = itemIdOf(p, "comment:");
+    if (!id) return Promise.resolve();
+    return withTab(p, function (t) {
+      var c = t.comments.filter(function (x) {
+        return String(x.id) === id;
+      })[0];
+      if (c) return api.network.openUrl(c.url);
+    });
+  },
+  "tab-import": function (p) {
+    return tabImport(p);
+  },
+  "tab-update": function (p) {
+    return tabImport(p);
+  },
+  "tab-import-lyrics": function (p) {
+    return tabImportLyrics(p);
+  },
+  "tab-update-lyrics": function (p) {
+    return tabImportLyrics(p);
+  },
+  "tab-confirm-replace-lyrics": function (p) {
+    return withTab(p, function (t) {
+      t.confirm = null;
+      return importLyrics(p && p.id, true).then(function () {
+        return refreshTab(t.entity, false);
+      });
+    });
+  },
+  "tab-cancel-confirm": function (p) {
+    return withTab(p, function (t) {
+      t.confirm = null;
+      return refreshTab(t.entity, false);
+    });
+  },
+  "tab-publish-sheet": function (p) {
+    var e = entityOf(p);
+    return e ? publishSong(e.name, e.artistName).then(function () {
+      return refreshTab(e, true);
+    }) : Promise.resolve();
+  },
+  "tab-publish-lyrics": function (p) {
+    var e = entityOf(p);
+    return e ? publishLyrics(e.name, e.artistName, e.albumTitle).then(function () {
+      return refreshTab(e, true);
+    }) : Promise.resolve();
+  },
+  "open-subject": function (p) {
+    var id = itemIdOf(p, "subject:");
+    openSubject(id && state.subjectsById[id]);
+  },
+};
+
+// A cue sheet from the tab: the button's own label says what happens ("Use
+// instead of yours" when the song has a sheet), so it doesn't stop to ask again.
+// Reloaded afterwards, so "Publish my cue sheet" follows the sheet now in place.
+function tabImport(p) {
+  var id = rowId(p);
+  if (!id) return Promise.resolve();
+  return withTab(p, function (t) {
+    return importItem(id, true).then(function () {
+      return refreshTab(t.entity, true);
+    });
+  });
+}
+
+// Synced lyrics from the tab. Their button says only "Import", so replacing
+// synced lyrics the song already has — which may be the user's own edit, and
+// Undo can't bring back — asks first, in the tab itself: the view's confirm is
+// on a page the user isn't looking at.
+function tabImportLyrics(p) {
+  var id = rowId(p);
+  if (!id) return Promise.resolve();
+  return withTab(p, function (t) {
+    t.confirm = null;
+    return importLyrics(id, false, function (c) {
+      t.confirm = c;
+    }).then(function () {
+      return refreshTab(t.entity, false);
+    });
+  });
+}
+
+function likeComment(p, on) {
+  var id = itemIdOf(p, "comment:");
+  if (!id || !requireSignIn("like")) return Promise.resolve();
+  return withTab(p, function (t) {
+    return request(on ? "PUT" : "DELETE", "/v1/comments/" + encodeURIComponent(id) + "/like", undefined, true)
+      .then(function (d) {
+        t.comments = t.comments.map(function (c) {
+          return String(c.id) === id ? Object.assign({}, c, { likes: d.likes, liked: d.liked }) : c;
+        });
+        return refreshTab(t.entity, false);
+      })
+      .catch(function (e) {
+        fail("Couldn't like that comment", e);
+      });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Seek-bar ticks: the playing song's timed comments
+// ---------------------------------------------------------------------------
+
+function canMark() {
+  return !!(api.playback && typeof api.playback.setMarkers === "function");
+}
+
+// The playing song's timed comments as ticks. Once per track (the start event
+// and the restore at launch can both ask); `fresh` asks again past the lookup
+// cache, after a comment changed what there is to show.
+function loadTicks(track, fresh) {
+  if (!state.ticks || !canMark() || !track || !track.title || !track.key) return Promise.resolve();
+  if (!fresh && state.ticksKey === track.key) return Promise.resolve();
+  state.ticksKey = track.key;
+  return resolveSubject("track", track.title, track.artist_name || null, !!fresh)
+    .then(function (s) {
+      if (!s || !s.comments) return [];
+      return request("GET", "/v1/subjects/" + encodeURIComponent(s.id) + "/comments?timed=1").then(function (d) {
+        return d.comments || [];
+      });
+    })
+    .then(function (comments) {
+      // Switched off while this was on its way: the bar was cleared, keep it so.
+      if (!state.ticks || !api) return;
+      api.playback.setMarkers(
+        track.key,
+        comments.map(function (c) {
+          return { at: c.atSecs, label: "@" + c.author.login + ": " + c.body };
+        })
+      );
+    })
+    .catch(function (e) {
+      api.log("warn", "Couldn't load the timed comments: " + errorText(e));
+    });
+}
+
+function currentTrack() {
+  return api.playback && typeof api.playback.getCurrentTrack === "function" ? api.playback.getCurrentTrack() : null;
+}
+
+function setTicks(on) {
+  state.ticks = !!on;
+  state.ticksKey = null;
+  var current = currentTrack();
+  return api.storage.set("ticks", state.ticks).then(function () {
+    render();
+    if (state.ticks) return loadTicks(current, true);
+    if (canMark() && current && current.key) api.playback.setMarkers(current.key, []);
+  });
+}
+
+// A comment was posted or deleted on this tab's song: redraw its ticks if it
+// is the one playing.
+function retick(entity) {
+  var here = playingHere(entity);
+  return here ? loadTicks(here, true) : null;
+}
+
+function tickNodes() {
+  if (!canMark()) {
+    return [{ type: "text", className: "ds-muted", content: "Ticks on the seek bar need a newer Viboplr." }];
+  }
+  return [
+    {
+      type: "settings-row",
+      label: "Timed comments on the seek bar",
+      description:
+        "Ticks where people commented on a moment of the playing song; point at one to read it. While this is on, every song you play is looked up on Viboplr Community.",
+      control: { type: "toggle", label: "", action: "toggle-ticks", checked: state.ticks },
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -1910,12 +2797,14 @@ function noticeNodes(m) {
   return m.notice ? [{ type: "text", content: m.notice, className: "ds-muted" }] : [];
 }
 
-// Mine: one section per module — the integration's own, else what you shared.
+// You: the seek-bar ticks switch, then what's shareable from this computer and
+// what you shared — a section per module.
 function mineNodes() {
   var nodes = [];
   if (!state.token) {
     nodes.push(banner("Sign in with GitHub to share, and to see what you've shared.", "muted", [{ type: "button", label: "Sign in", action: "sign-in", variant: "accent" }]));
   }
+  nodes.push({ type: "section", title: "While you listen", children: tickNodes() });
   if (state.loading && !state.local && !Object.keys(state.shared).length) {
     nodes.push({ type: "loading", message: "Reading what's yours…" });
     return nodes;
@@ -1928,10 +2817,18 @@ function mineNodes() {
       nodes.push({ type: "section", title: "Your " + pluralOf(m), children: sharedNodes(m) });
     }
   });
+  nodes.push({
+    type: "layout",
+    direction: "horizontal",
+    children: [
+      { type: "text", className: "ds-muted", content: "Your likes and comments are on the website." },
+      { type: "button", label: "Open my page", action: "open-my-page", variant: "secondary" },
+    ],
+  });
   return nodes;
 }
 
-// The generic Mine section: the items you shared in a module.
+// The generic section on You: the items you shared in a module.
 function sharedNodes(m) {
   var share = shareButton(m);
   var tail = share ? [share] : [];
@@ -1958,8 +2855,8 @@ function sharedNodes(m) {
   ].concat(tail);
 }
 
-function confirmNode() {
-  var c = state.confirm;
+function confirmNode(c) {
+  c = c || state.confirm;
   var forSong = "“" + c.title + "”" + (c.artist ? " by " + c.artist : "");
   if (c.kind === "import-lyrics") {
     return {
@@ -1978,7 +2875,7 @@ function confirmNode() {
       title: "Use these synced lyrics instead?",
       message:
         forSong + " already has synced lyrics" + (c.from ? " (from " + c.from + ")" : "") + ". Importing @" + c.by +
-        "'s shows theirs instead — undo the import later (Community → Mine) and yours come back.",
+        "'s shows theirs instead — undo the import later (Community → You) and yours come back.",
       confirmLabel: "Import",
       confirmAction: "confirm-replace-lyrics",
       cancelAction: "cancel-confirm",
@@ -2028,11 +2925,13 @@ function render() {
       type: "tabs",
       action: "tab",
       activeTab: state.tab,
-      tabs: state.modules
-        .map(function (m) {
-          return { id: m.kind, label: m.name };
-        })
-        .concat([{ id: MINE, label: "Mine" }]),
+      tabs: [{ id: DISCOVER, label: "Discover" }]
+        .concat(
+          tabModules().map(function (m) {
+            return { id: m.kind, label: m.name };
+          })
+        )
+        .concat([{ id: MINE, label: "You" }]),
     },
   ];
   if (state.confirm) children.push(confirmNode());
@@ -2059,7 +2958,7 @@ function render() {
     children.push(banner("Couldn't reach Viboplr Community: " + state.error, "warning", [{ type: "button", label: "Try again", action: "retry", variant: "accent" }]));
   }
   var m = currentModule();
-  var body = state.tab === MINE || !m ? mineNodes() : moduleNodes(m);
+  var body = state.tab === DISCOVER ? discoverNodes() : state.tab === MINE || !m ? mineNodes() : moduleNodes(m);
   api.ui.setViewData(VIEW, { type: "layout", direction: "vertical", children: children.concat(body) }, { scrollKey: state.tab });
 }
 
@@ -2104,15 +3003,29 @@ var ACTIONS = {
     return m && m.shareUrl ? api.network.openUrl(m.shareUrl) : undefined;
   },
   retry: function () {
-    state.error = null;
-    return state.tab === MINE ? loadMine() : loadTab();
+    return switchTab(state.tab);
+  },
+  // --- discover ---
+  "discover-search": function (p) {
+    return searchSubjects(p && p.query);
+  },
+  "feed-more": function () {
+    return withLoading(function () {
+      return loadFeed(state.discover.feedPage + 1);
+    });
+  },
+  "open-entry": function (p) {
+    var id = itemIdOf(p, "entry:");
+    return openEntry(Number(id));
+  },
+  // --- you ---
+  "toggle-ticks": function (p) {
+    return setTicks(p && p.value);
+  },
+  "open-my-page": function () {
+    return api.network.openUrl(SERVER + "/me");
   },
   // --- cue sheets ---
-  "cue-scope": function (p) {
-    state.cueScope = p && p.value === "song" ? "song" : "all";
-    state.error = null;
-    return loadTab();
-  },
   import: function (p) {
     return importItem(rowId(p), false);
   },
@@ -2246,6 +3159,7 @@ function onDeepLink(url) {
   if (!link) return;
   if (link.path === "auth") finishSignIn(link.params);
   else if (link.path === "open") openShared(link.params.id);
+  else if (link.path === "subject") openSubjectLink(link.params.id);
 }
 
 // ---------------------------------------------------------------------------
@@ -2258,19 +3172,17 @@ function activate(pluginApi) {
   Object.keys(ACTIONS).forEach(function (id) {
     api.ui.onAction(id, ACTIONS[id]);
   });
-  api.contextMenu.onAction("find-cues", function (target) {
+  Object.keys(TAB_ACTIONS).forEach(function (id) {
+    api.ui.onAction(id, TAB_ACTIONS[id]);
+  });
+  // The song's own page, on its Community tab.
+  api.contextMenu.onAction("show-on-community", function (target) {
     if (!target || !target.title) return;
-    api.ui.navigateToView(VIEW);
-    return showSong({ title: target.title, artist: target.artistName || null });
+    openInApp("track", target.title, target.artistName || null, target.albumTitle || null);
   });
   api.contextMenu.onAction("publish-cues", function (target) {
     if (!target || !target.title) return;
     return publishSong(target.title, target.artistName || null);
-  });
-  api.contextMenu.onAction("find-lyrics", function (target) {
-    if (!target || !target.title) return;
-    api.ui.navigateToView(VIEW);
-    return findLyrics(target.title, target.artistName || null);
   });
   api.contextMenu.onAction("publish-lyrics", function (target) {
     if (!target || !target.title) return;
@@ -2282,12 +3194,19 @@ function activate(pluginApi) {
   });
   api.network.onDeepLink(onDeepLink);
   registerSongCounts();
+  registerTabs();
+  if (api.playback && typeof api.playback.onTrackStarted === "function") {
+    api.playback.onTrackStarted(function (track) {
+      loadTicks(track);
+    });
+  }
 
   var restored = Promise.all([
     api.storage.get("session"),
     api.storage.get("imports"),
     api.storage.get("modules"),
     api.storage.get("lyricsImports"),
+    api.storage.get("ticks"),
   ]).then(function (vals) {
     var session = vals[0];
     if (session && session.token) {
@@ -2296,11 +3215,14 @@ function activate(pluginApi) {
     }
     state.imports = vals[1] || {};
     var cached = validModules(vals[2]);
-    if (cached.length) {
-      state.modules = cached;
-      state.tab = cached[0].kind;
-    }
+    if (cached.length) state.modules = cached;
     state.lyricsImports = vals[3] || {};
+    state.ticks = vals[4] === true;
+  });
+  // The song already playing: its start event came before the setting was
+  // read, or not at all (the plugin was enabled or updated mid-song).
+  restored.then(function () {
+    if (api) loadTicks(currentTrack());
   });
   restored
     .catch(function (e) {
@@ -2314,7 +3236,7 @@ function activate(pluginApi) {
         firstLoadTimer = null;
         if (!api) return;
         loadModules().then(function () {
-          if (api && state.tab !== MINE) loadTab();
+          if (api && state.tab !== MINE) switchTab(state.tab);
         });
       }, FIRST_LOAD_DELAY_MS);
     });
@@ -2344,6 +3266,10 @@ return {
   _playlistRow: playlistRow,
   _countsText: countsText,
   _countsTitleLine: countsTitleLine,
+  _tabTree: tabTree,
+  _feedRow: feedRow,
+  _subjectRow: subjectRow,
+  _areaOf: areaOf,
   _builtinModules: BUILTIN_MODULES,
   _loadModules: function () {
     return loadModules();
