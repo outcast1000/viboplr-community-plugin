@@ -1436,43 +1436,69 @@ function sharedLyrics(key) {
 
 // Publish the synced lyrics the app has for a song, wherever they came from —
 // a lyrics site, a file next to the song, an edit, an earlier import.
-function publishLyrics(title, artist, album) {
-  if (!requireSignIn("publish")) return Promise.resolve();
-  if (!canFetchInfo()) {
-    notify("This version of Viboplr doesn't let plugins read lyrics.");
-    return Promise.resolve();
-  }
-  return currentLyrics(title, artist)
-    .then(function (value) {
-      if (!value || typeof value.text !== "string" || !value.text.trim()) {
-        notify("There are no lyrics for “" + title + "” to publish.");
-        return;
-      }
-      if (value.kind !== "synced") {
-        notify("“" + title + "” only has plain lyrics. Only synced lyrics can be shared.");
-        return;
-      }
-      var body = { kind: "synced_lyrics", title: title, artistName: artist || undefined, albumName: album || undefined, lrc: value.text };
-      var now = api.playback && api.playback.getCurrentTrack ? api.playback.getCurrentTrack() : null;
-      if (now && songKey(now.title, now.artist_name) === songKey(title, artist) && now.duration_secs) body.durationSecs = now.duration_secs;
-      return albumArtistFor(title, artist, album).then(function (albumArtist) {
+// The core reports instead of toasting, so the menu item and the assistant tool
+// share it: it resolves { status: "published" | "updated", item } or
+// { status: "no-lyrics" | "plain-only" }, and rejects when it can't try or the
+// server says no (signed out, lyrics unreadable, network, a 4xx).
+function publishLyricsCore(title, artist, album) {
+  if (!state.token) return Promise.reject(requestError("Sign in with GitHub first.", 401));
+  if (!canFetchInfo()) return Promise.reject(new Error("This version of Viboplr doesn't let plugins read lyrics."));
+  return currentLyrics(title, artist).then(function (value) {
+    if (!value || typeof value.text !== "string" || !value.text.trim()) return { status: "no-lyrics" };
+    if (value.kind !== "synced") return { status: "plain-only" };
+    var body = { kind: "synced_lyrics", title: title, artistName: artist || undefined, albumName: album || undefined, lrc: value.text };
+    var now = api.playback && api.playback.getCurrentTrack ? api.playback.getCurrentTrack() : null;
+    if (now && songKey(now.title, now.artist_name) === songKey(title, artist) && now.duration_secs) body.durationSecs = now.duration_secs;
+    return albumArtistFor(title, artist, album)
+      .then(function (albumArtist) {
         if (albumArtist) body.albumArtistName = albumArtist;
         return request("POST", "/v1/items", body, true);
-      }).then(function (data) {
+      })
+      .then(function (data) {
         var list = (state.shared.synced_lyrics || []).filter(function (it) {
           return it.id !== data.item.id;
         });
         state.shared.synced_lyrics = list.concat([data.item]);
         state.lastPublishedUrl = data.item.url;
-        notify((data.created ? "Published the synced lyrics for “" : "Updated the synced lyrics for “") + title + "”.", {
+        render();
+        return { status: data.created ? "published" : "updated", item: data.item };
+      });
+  });
+}
+
+function publishLyrics(title, artist, album) {
+  if (!requireSignIn("publish")) return Promise.resolve();
+  return publishLyricsCore(title, artist, album)
+    .then(function (out) {
+      if (out.status === "no-lyrics") notify("There are no lyrics for “" + title + "” to publish.");
+      else if (out.status === "plain-only") notify("“" + title + "” only has plain lyrics. Only synced lyrics can be shared.");
+      else {
+        notify((out.status === "published" ? "Published the synced lyrics for “" : "Updated the synced lyrics for “") + title + "”.", {
           action: { label: "Open page", id: "open-last-published" },
         });
-        render();
-      });
+      }
     })
     .catch(function (e) {
       fail("Couldn't publish", e);
     });
+}
+
+// The assistant's version: request/response, so the caller learns what happened.
+// It publishes only what the app already has for the song — it never takes
+// lyrics from the caller — and the "Plugin actions" switch gates it.
+function publishLyricsTool(args) {
+  var title = args && typeof args.title === "string" ? args.title.trim() : "";
+  if (!title) throw new Error("title is required.");
+  var artist = args && typeof args.artistName === "string" && args.artistName.trim() ? args.artistName.trim() : null;
+  var album = args && typeof args.albumName === "string" && args.albumName.trim() ? args.albumName.trim() : null;
+  if (!state.token) {
+    throw new Error("Not signed in to Viboplr Community. Ask the user to sign in with GitHub in the Community view (You tab); you can't do that for them.");
+  }
+  return publishLyricsCore(title, artist, album).then(function (out) {
+    if (out.status === "no-lyrics") throw new Error("Viboplr has no lyrics for “" + title + "”. Nothing was published.");
+    if (out.status === "plain-only") throw new Error("“" + title + "” only has plain lyrics in Viboplr; only synced lyrics can be shared. Nothing was published.");
+    return { status: out.status, id: out.item.id, url: out.item.url };
+  });
 }
 
 function unpublishLyrics(key) {
@@ -3439,6 +3465,9 @@ function activate(pluginApi) {
     if (!target || !target.title) return;
     return publishSong(target.title, target.artistName || null);
   });
+  if (api.assistant && typeof api.assistant.onTool === "function") {
+    api.assistant.onTool("publish_lyrics", publishLyricsTool);
+  }
   api.contextMenu.onAction("publish-lyrics", function (target) {
     if (!target || !target.title) return;
     return publishLyrics(target.title, target.artistName || null, target.albumTitle || null);

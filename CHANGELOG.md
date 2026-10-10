@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.3.0
+- **An AI assistant can publish synced lyrics.** A new `publish_lyrics` assistant tool sends the synced lyrics Viboplr already has for a song to Viboplr Community, under your account, and reports back what happened (published or updated, with the page link). It needs Settings → AI control → *Plugin actions*, and you signed in to Community; it never takes lyrics from the assistant, only what Viboplr has, and says why when there are none, they're plain, or you're signed out.
+
 ## v1.2.0
 - **Scrobbling, like Last.fm** (You → *Send from Viboplr* → *Send my plays to Community*, off until you switch it on): each song you play past halfway or four minutes — the same rule the app uses for its own history — is sent to Viboplr Community. Your list of plays is only yours (Community → You → Plays, where you can also delete it all); everyone else sees only totals: plays and listeners on song, album and artist pages, and the charts. Plays made offline or while Community is down wait and go later, at their own time; plays older than two weeks are dropped. Songs you already played aren't sent.
 - **Send your likes to Community** (You → *Send from Viboplr*, off until you switch it on, signed in only): from then on, a song, album or artist you like anywhere in Viboplr is liked on Viboplr Community too, and un-liking or disliking it takes that like away. Likes you already have aren't sent. Something nobody has shared about yet gets its Community page from your like. Needs a Viboplr that reports likes to plugins; older ones say so in the same place.
