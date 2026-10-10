@@ -163,6 +163,18 @@ test("something nobody shared about still gets a tab, inviting the first share",
   assert.ok(nodes(out.value, "button").some((b) => b.action === "tab-publish-lyrics"));
 });
 
+test("rows show the picture Community matched, and only one Community serves", async () => {
+  const { plugin } = await setup();
+  const art = { small: "https://community.viboplr.com/art/3/80.jpg?v=abc", large: "https://community.viboplr.com/art/3/240.jpg?v=abc" };
+  assert.equal(plugin._subjectRow({ ...JOGA, art }).imageUrl, art.small);
+  assert.equal(plugin._subjectRow({ ...JOGA, art: null }).imageUrl, undefined, "none matched: the host's own art for the names");
+  assert.equal(plugin._subjectRow(JOGA).imageUrl, undefined, "an older server sends no art");
+  assert.equal(plugin._subjectRow({ ...JOGA, art: { small: "https://evil.example/x.jpg" } }).imageUrl, undefined);
+  const entry = { type: "comment", subject: { ...JOGA, art }, comment: COMMENT, at: 0 };
+  assert.equal(plugin._feedRow(entry, 0).imageUrl, art.small);
+  assert.equal(plugin._feedRow({ type: "item", event: "shared", item: SHEET_ITEM, at: 0 }, 1).imageUrl, undefined);
+});
+
 test("an artist's tab lists its songs with something shared, and has no image gallery", async () => {
   const { host, log } = await setup();
   const tree = (await tab(host, "artist", { kind: "artist", name: "Björk" })).value;

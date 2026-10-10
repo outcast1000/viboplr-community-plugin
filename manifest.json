@@ -1,7 +1,7 @@
 {
   "id": "community",
   "name": "Viboplr Community",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "author": "Viboplr",
   "description": "Viboplr Community inside the app: a Community tab on every song, album and artist page — like and comment, import shared cue sheets and synced lyrics — plus mixtapes, Subsonic servers opened to members, and publishing your own. Sign in with GitHub to share, like, comment or see shared servers; browsing, playing and importing needs no account.",
   "minAppVersion": "1.0.97",

@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.0
+- **Artist photos and album covers** on Discover's search results, the feed, and the album / song lists on a Community tab: the picture Viboplr Community matched for it (a song shows its album's cover, else its artist's photo). Where Community has none, a row keeps the art Viboplr already has on disk for that name.
+
 ## v1.0.1
 - Releases are now signed with the Viboplr plugin-signing key, so Viboplr allows the permissions this plugin asks for without prompting. No functional changes.
 

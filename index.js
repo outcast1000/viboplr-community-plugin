@@ -1936,6 +1936,15 @@ function subjectFacts(s) {
   return bits;
 }
 
+// The subject's picture as the server matched it (a song's is its album's
+// cover, else its artist's photo): the small thumbnail, and only one served
+// by Community itself. Without one the row keeps the host's own art for the
+// names (artwork: "cached"), else none.
+function subjectArt(s) {
+  var url = s && s.art && s.art.small;
+  return typeof url === "string" && url.indexOf(SERVER + "/art/") === 0 ? url : undefined;
+}
+
 function subjectRow(s) {
   var lead = [KIND_LABELS[s.kind] || s.kind];
   if (s.kind !== "artist" && s.artistName) lead.push(s.artistName);
@@ -1945,6 +1954,7 @@ function subjectRow(s) {
     subtitle: lead.concat(subjectFacts(s)).join(" · "),
     artistName: s.kind === "artist" ? s.name : s.artistName || null,
     albumTitle: s.kind === "album" ? s.name : null,
+    imageUrl: subjectArt(s),
     action: "open-subject",
   };
 }
@@ -2015,6 +2025,7 @@ function feedRow(e, i) {
     subtitle: "@" + who + " " + what + " · " + ago(e.at),
     artistName: s ? (s.kind === "artist" ? s.name : s.artistName || null) : null,
     albumTitle: s && s.kind === "album" ? s.name : null,
+    imageUrl: subjectArt(s),
     action: "open-entry",
   };
 }
