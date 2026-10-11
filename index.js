@@ -62,6 +62,10 @@ var MAX_AUTHOR_CHARS = 64;
 var FIRST_LOAD_DELAY_MS = 3000;
 var MINE = "you";
 var DISCOVER = "discover";
+var SETTINGS = "settings";
+// The first Viboplr that opens a plugin's own Extensions page on
+// requestAction("open-extension-settings"); older ones ignore the action.
+var EXTENSION_SETTINGS_MIN_APP = "1.0.103";
 // The Community tab on each kind of page (information type ids: one per
 // entity kind, since a plugin's type ids are unique).
 var TAB_TYPES = { track: "community_track", album: "community_album", artist: "community_artist" };
@@ -97,9 +101,9 @@ function freshState() {
     ticks: false,
     // The track whose ticks were last asked for, so it's asked once.
     ticksKey: null,
-    // Send the likes made in the app to Community. Off by default: a like on
-    // Community is public, and it names the song to the server.
-    syncLikes: false,
+    // Send the likes made in the app to Community. On by default (owner
+    // decision, 2026-10-11): only an explicit switch-off is stored as false.
+    syncLikes: true,
     // Scrobbling (on/off is the app's Settings → Scrobbling): plays not yet
     // sent, saved across restarts. `scrobble` is the old opt-in switch, read
     // only on a Viboplr that doesn't own scrobbling (hostOwnsScrobbling).
@@ -305,7 +309,7 @@ function forgetMembersOnly() {
 function validModules(list) {
   if (!Array.isArray(list)) return [];
   return list.filter(function (m) {
-    return m && typeof m.kind === "string" && typeof m.name === "string" && typeof m.url === "string" && m.kind !== MINE && m.kind !== DISCOVER;
+    return m && typeof m.kind === "string" && typeof m.name === "string" && typeof m.url === "string" && m.kind !== MINE && m.kind !== DISCOVER && m.kind !== SETTINGS;
   });
 }
 
@@ -886,6 +890,7 @@ function isTab(tab) {
   return (
     tab === MINE ||
     tab === DISCOVER ||
+    tab === SETTINGS ||
     tabModules().some(function (m) {
       return m.kind === tab;
     })
@@ -897,6 +902,8 @@ function switchTab(tab) {
   state.error = null;
   if (state.tab === MINE) return loadMine();
   if (state.tab === DISCOVER) return loadDiscover();
+  // Settings reads nothing from the server: everything on it is local state.
+  if (state.tab === SETTINGS) return Promise.resolve(render());
   return loadTab();
 }
 
@@ -2988,7 +2995,8 @@ function sendPlays() {
       if (!done || !api) return;
       state.playQueue = state.playQueue.slice(batch.length);
       return savePlayQueue().then(function () {
-        if (state.tab === MINE) render();
+        // Settings shows how many plays are waiting.
+        if (state.tab === SETTINGS) render();
         if (state.playQueue.length) return sendPlays();
       });
     });
@@ -3196,15 +3204,51 @@ function noticeNodes(m) {
   return m.notice ? [{ type: "text", content: m.notice, className: "ds-muted" }] : [];
 }
 
-// You: the seek-bar ticks switch, then what's shareable from this computer and
-// what you shared — a section per module.
+// Settings: every switch the plugin has, then a way to the host-drawn ones
+// (permissions, which menu items and views show) on its Extensions page.
+function settingsNodes() {
+  var nodes = [
+    { type: "section", title: "While you listen", children: tickNodes() },
+    { type: "section", title: "Send from Viboplr", children: scrobbleNodes().concat(likeSyncNodes()) },
+  ];
+  if (versionAtLeast(api.appVersion, EXTENSION_SETTINGS_MIN_APP)) {
+    nodes.push({
+      type: "section",
+      title: "Extension",
+      children: [
+        {
+          type: "settings-row",
+          label: "Permissions, menu items and views",
+          description: "What Viboplr Community may do, which of its right-click items and views show, and switching it off. Viboplr keeps these on its Extensions page.",
+          control: { type: "button", label: "Open in Extensions", action: "open-extension-settings", variant: "secondary" },
+        },
+      ],
+    });
+  }
+  return nodes;
+}
+
+// "1.0.103" >= "1.0.94", numerically per part; anything unreadable is "no".
+function versionAtLeast(have, want) {
+  if (typeof have !== "string") return false;
+  var a = have.split(/[.-]/);
+  var b = want.split(".");
+  for (var i = 0; i < b.length; i++) {
+    var x = parseInt(a[i], 10);
+    var y = parseInt(b[i], 10);
+    if (isNaN(x)) return false;
+    if (x !== y) return x > y;
+  }
+  return true;
+}
+
+// You: what's shareable from this computer and what you shared — a section
+// per module. The switches live on Settings.
 function mineNodes() {
   var nodes = [];
   if (!state.token) {
     nodes.push(banner("Sign in with GitHub to share, and to see what you've shared.", "muted", [{ type: "button", label: "Sign in", action: "sign-in", variant: "accent" }]));
   }
-  nodes.push({ type: "section", title: "While you listen", children: tickNodes() });
-  nodes.push({ type: "section", title: "Send from Viboplr", children: scrobbleNodes().concat(likeSyncNodes()) });
   if (state.loading && !state.local && !Object.keys(state.shared).length) {
     nodes.push({ type: "loading", message: "Reading what's yours…" });
     return nodes;
@@ -3331,7 +3375,10 @@ function render() {
             return { id: m.kind, label: m.name };
           })
         )
-        .concat([{ id: MINE, label: "You" }]),
+        .concat([
+          { id: MINE, label: "You" },
+          { id: SETTINGS, label: "Settings" },
+        ]),
     },
   ];
   if (state.confirm) children.push(confirmNode());
@@ -3358,7 +3405,8 @@ function render() {
     children.push(banner("Couldn't reach Viboplr Community: " + state.error, "warning", [{ type: "button", label: "Try again", action: "retry", variant: "accent" }]));
   }
   var m = currentModule();
-  var body = state.tab === DISCOVER ? discoverNodes() : state.tab === MINE || !m ? mineNodes() : moduleNodes(m);
+  var body =
+    state.tab === DISCOVER ? discoverNodes() : state.tab === SETTINGS ? settingsNodes() : state.tab === MINE || !m ? mineNodes() : moduleNodes(m);
   api.ui.setViewData(VIEW, { type: "layout", direction: "vertical", children: children.concat(body) }, { scrollKey: state.tab });
 }
 
@@ -3428,6 +3476,9 @@ var ACTIONS = {
   },
   "open-my-plays": function () {
     return api.network.openUrl(SERVER + "/me?tab=plays");
+  },
+  "open-extension-settings": function () {
+    api.ui.requestAction("open-extension-settings", {});
   },
   "toggle-sync-likes": function (p) {
     if (!state.token) return Promise.resolve(render());
@@ -3637,7 +3688,7 @@ function activate(pluginApi) {
     if (cached.length) state.modules = cached;
     state.lyricsImports = vals[3] || {};
     state.ticks = vals[4] === true;
-    state.syncLikes = vals[5] === true;
+    state.syncLikes = vals[5] !== false;
     // A play counted while storage was being read joins the saved ones.
     state.playQueue = (Array.isArray(vals[6]) ? vals[6] : []).concat(state.playQueue);
     state.scrobble = vals[7] === true;
@@ -3661,7 +3712,7 @@ function activate(pluginApi) {
         firstLoadTimer = null;
         if (!api) return;
         loadModules().then(function () {
-          if (api && state.tab !== MINE) switchTab(state.tab);
+          if (api && state.tab !== MINE && state.tab !== SETTINGS) switchTab(state.tab);
         });
       }, FIRST_LOAD_DELAY_MS);
     });

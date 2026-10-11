@@ -84,6 +84,7 @@ async function setup(opts = {}) {
   const host = makeHost({ route: route(log), ...opts });
   if (opts.session) host.storage.set("session", opts.session);
   if (opts.ticks) host.storage.set("ticks", true);
+  if (opts.syncLikes !== undefined) host.storage.set("syncLikes", opts.syncLikes);
   await plugin.activate(host.api);
   return { plugin, host, log };
 }
@@ -95,7 +96,7 @@ test("Discover searches songs, albums and artists and opens them on their Commun
   const { host } = await setup();
   await host.actions["discover-search"]({ query: "bjork" });
   const view = host.lastView();
-  assert.deepEqual(nodes(view, "tabs")[0].tabs.map((t) => t.label), ["Discover", "Mixtapes", "Subsonic servers", "You"]);
+  assert.deepEqual(nodes(view, "tabs")[0].tabs.map((t) => t.label), ["Discover", "Mixtapes", "Subsonic servers", "You", "Settings"]);
   const sections = nodes(view, "section").map((s) => s.title);
   assert.deepEqual(sections.slice(0, 2), ["Artists", "Songs"]);
   const song = nodes(view, "track-row-list")[1].items[0];
@@ -184,19 +185,24 @@ test("rows show the picture Community matched, and only one Community serves", a
   assert.equal(plugin._feedRow({ type: "item", event: "shared", item: SHEET_ITEM, at: 0 }, 1).imageUrl, undefined);
 });
 
-test("likes made in the app reach Community only once switched on, as likes and un-likes", async () => {
+test("likes made in the app reach Community by default, as likes and un-likes, until switched off", async () => {
   const { host, log } = await setup({ session: SIGNED_IN });
   const sent = () => log.filter(([, p]) => p === "/v1/likes").map(([m]) => m);
   const like = (over) => host.likeChanged({ kind: "track", name: "Jóga", artistName: "Björk", albumTitle: "Homogenic", albumArtistName: "Björk", liked: 1, previous: 0, ...over });
 
-  // Off by default: nothing leaves the app.
+  // On by default: nothing stored yet still sends.
+  await host.actions.tab({ tabId: "settings" });
+  const toggle = () => nodes(host.lastView(), "toggle").find((t) => t.action === "toggle-sync-likes");
+  assert.equal(toggle().checked, true);
+
+  // Switched off: nothing leaves the app, and the choice is kept.
+  await host.actions["toggle-sync-likes"]({ value: false });
+  assert.equal(toggle().checked, false);
+  assert.equal(host.storage.get("syncLikes"), false);
   await like();
   await flush();
   assert.deepEqual(sent(), []);
 
-  await host.actions.tab({ tabId: "you" });
-  const toggle = () => nodes(host.lastView(), "toggle").find((t) => t.action === "toggle-sync-likes");
-  assert.equal(toggle().checked, false);
   await host.actions["toggle-sync-likes"]({ value: true });
   assert.equal(toggle().checked, true);
   assert.equal(host.storage.get("syncLikes"), true);
@@ -233,7 +239,7 @@ test("a play handed over is sent, with when it started, and reported as sent", a
   assert.deepEqual({ ...sent, playedAt: 0 }, { title: "Jóga", artistName: "Björk", albumName: "Homogenic", albumArtistName: "Björk", playedAt: 0 });
   assert.ok(Math.abs(sent.playedAt - (before - 152)) <= 1, "the play started 152 s before the threshold");
   assert.deepEqual(host.storage.get("playQueue"), [], "sent plays leave the queue");
-  await host.actions.tab({ tabId: "you" });
+  await host.actions.tab({ tabId: "settings" });
   assert.match(JSON.stringify(nodes(host.lastView(), "text")), /All your plays are sent/);
   assert.ok(!nodes(host.lastView(), "toggle").some((n) => n.action === "toggle-scrobble"), "no switch of its own");
   // A song with no artist isn't a scrobble the server can take.
@@ -250,7 +256,7 @@ test("on a Viboplr that doesn't own scrobbling, plays wait for the plugin's own 
   assert.equal(await host.trackScrobbled(PLAYED), undefined);
   await flush();
   assert.equal(posts().length, 0, "off until switched on");
-  await host.actions.tab({ tabId: "you" });
+  await host.actions.tab({ tabId: "settings" });
   assert.ok(nodes(host.lastView(), "toggle").some((n) => n.action === "toggle-scrobble"), "the switch is shown");
   await host.actions["toggle-scrobble"]({ value: true });
   assert.equal(host.storage.get("scrobble"), true);
@@ -278,7 +284,7 @@ test("plays made while Community is unreachable wait, survive a restart, and go 
     assert.equal(report.status, "queued");
     assert.equal(report.pending, 2);
     assert.match(report.message, /Couldn't reach Viboplr Community/);
-    await host.actions.tab({ tabId: "you" });
+    await host.actions.tab({ tabId: "settings" });
     assert.match(JSON.stringify(nodes(host.lastView(), "text")), /2 plays waiting to be sent/);
 
     // The app restarts with the server back: the queue goes out on its own.
@@ -318,10 +324,38 @@ test("plays the server refuses or too old to send are dropped, and the app is to
   }
 });
 
+test("the switches live on Settings, which links to the plugin's Extensions page on a host that opens it", async () => {
+  const toggles = (host) => nodes(host.lastView(), "toggle").map((t) => t.action);
+  const extButton = (host) => nodes(host.lastView(), "button").find((b) => b.action === "open-extension-settings");
+
+  const old = await setup({ session: SIGNED_IN });
+  await old.host.actions.tab({ tabId: "you" });
+  assert.ok(!toggles(old.host).includes("toggle-sync-likes"), "You holds no switches");
+  await old.host.actions.tab({ tabId: "settings" });
+  assert.ok(toggles(old.host).includes("toggle-sync-likes"));
+  assert.ok(toggles(old.host).includes("toggle-ticks"));
+  assert.equal(extButton(old.host), undefined, "an older host can't open the page, so no button");
+
+  const { host } = await setup({ session: SIGNED_IN, appVersion: "1.0.103" });
+  await host.actions.tab({ tabId: "settings" });
+  assert.ok(extButton(host));
+  await host.actions["open-extension-settings"]();
+  assert.deepEqual(host.requestedActions.at(-1), ["open-extension-settings", {}]);
+});
+
+test("a saved switch-off survives a restart: likes stay in the app", async () => {
+  const { host, log } = await setup({ session: SIGNED_IN, syncLikes: false });
+  await host.likeChanged({ kind: "artist", name: "Björk", artistName: null, albumTitle: null, albumArtistName: null, liked: 1, previous: 0 });
+  await flush();
+  assert.ok(!log.some(([, p]) => p === "/v1/likes"));
+  await host.actions.tab({ tabId: "settings" });
+  assert.equal(nodes(host.lastView(), "toggle").find((t) => t.action === "toggle-sync-likes").checked, false);
+});
+
 test("signed out, likes stay in the app and the switch can't be turned on", async () => {
   const { host, log } = await setup();
   host.storage.set("syncLikes", true);
-  await host.actions.tab({ tabId: "you" });
+  await host.actions.tab({ tabId: "settings" });
   await host.actions["toggle-sync-likes"]({ value: true });
   const toggle = nodes(host.lastView(), "toggle").find((t) => t.action === "toggle-sync-likes");
   assert.equal(toggle.disabled, true);
@@ -344,7 +378,7 @@ test("seek-bar ticks are off until switched on, then show the playing song's tim
   host.trackStarted(track);
   await flush();
   assert.equal(log.filter(([, p]) => p.includes("/comments")).length, 0, "nothing asked while off");
-  await host.actions.tab({ tabId: "you" });
+  await host.actions.tab({ tabId: "settings" });
   const toggle = nodes(host.lastView(), "toggle").find((t) => t.action === "toggle-ticks");
   assert.equal(toggle.checked, false);
   await host.actions["toggle-ticks"]({ value: true });

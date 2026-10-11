@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.5.0
+- **Your likes go to Community by default.** *Send my likes to Community* (You → *Send from Viboplr*) now starts on: once you're signed in, a song, album or artist you like in Viboplr is liked on Viboplr Community too, and un-liking or disliking it takes that like away. Likes are public there. If you had never touched the switch, it is now on; if you had switched it off, it stays off. Likes you already had still aren't sent.
+- **A Settings tab.** The switches moved off You to a tab of their own: *Timed comments on the seek bar*, *Send my plays to Community* and *Send my likes to Community*. You now holds only what you publish and what you shared. On Viboplr 1.0.103 or later, Settings also has **Open in Extensions**, which opens Viboplr Community's page there: its permissions, which of its right-click items and views show, and switching it off. Those stay on that page because Viboplr draws them for every plugin.
+
 ## v1.4.1
 - Each permission now says why the plugin needs it, shown under it when Viboplr asks. No functional changes.
 
