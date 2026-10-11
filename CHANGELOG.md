@@ -1,7 +1,10 @@
 # Changelog
 
+## v1.5.1
+- **Songs are filed under their album when you publish.** A cue sheet or synced lyrics that names no album (an assistant-written sheet often doesn't) is now published under the album your library has the song on, so it shows under that album on the artist's Community page instead of under no album at all. A song your library has on more than one album (the original and a compilation) is published without one rather than guessed. To fix a song already shared under no album, publish it again.
+
 ## v1.5.0
-- **Your likes go to Community by default.** *Send my likes to Community* (You → *Send from Viboplr*) now starts on: once you're signed in, a song, album or artist you like in Viboplr is liked on Viboplr Community too, and un-liking or disliking it takes that like away. Likes are public there. If you had never touched the switch, it is now on; if you had switched it off, it stays off. Likes you already had still aren't sent.
+- **Your likes go to Community by default.** *Send my likes to Community* (Settings → *Send from Viboplr*) now starts on: once you're signed in, a song, album or artist you like in Viboplr is liked on Viboplr Community too, and un-liking or disliking it takes that like away. Likes are public there. If you had never touched the switch, it is now on; if you had switched it off, it stays off. Likes you already had still aren't sent.
 - **A Settings tab.** The switches moved off You to a tab of their own: *Timed comments on the seek bar*, *Send my plays to Community* and *Send my likes to Community*. You now holds only what you publish and what you shared. On Viboplr 1.0.103 or later, Settings also has **Open in Extensions**, which opens Viboplr Community's page there: its permissions, which of its right-click items and views show, and switching it off. Those stay on that page because Viboplr draws them for every plugin.
 
 ## v1.4.1

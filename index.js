@@ -1161,6 +1161,46 @@ function albumArtistFor(title, artist, album) {
     });
 }
 
+// The album to publish a song under, and that album's artist: the one the
+// sheet names, else the library's — the playing copy if it is this song, else
+// the only album the library has the song on. A song on several albums (the
+// original and a compilation) gets none rather than a guess. Without an album
+// the server files the song under no album, so the artist's page lists none.
+function albumFor(title, artist, album) {
+  if (album) {
+    return albumArtistFor(title, artist, album).then(function (albumArtist) {
+      return { album: album, albumArtist: albumArtist };
+    });
+  }
+  var none = { album: null, albumArtist: null };
+  var want = songKey(title, artist);
+  var now = api.playback && typeof api.playback.getCurrentTrack === "function" ? api.playback.getCurrentTrack() : null;
+  if (now && now.album_title && songKey(now.title, now.artist_name) === want) {
+    return Promise.resolve({ album: now.album_title, albumArtist: now.album_artist_name || null });
+  }
+  if (!api.library || typeof api.library.ftsTracks !== "function") return Promise.resolve(none);
+  return api.library
+    .ftsTracks(title, { limit: 25 })
+    .then(function (rows) {
+      var hits = (rows || []).filter(function (t) {
+        return t.album_title && songKey(t.title, t.artist_name) === want;
+      });
+      var albums = {};
+      hits.forEach(function (t) {
+        var k = fold(t.album_title);
+        if (!albums[k]) albums[k] = t; // the library's first spelling
+      });
+      var keys = Object.keys(albums);
+      if (keys.length !== 1) return none;
+      var hit = albums[keys[0]];
+      return { album: hit.album_title, albumArtist: hit.album_artist_name || null };
+    })
+    .catch(function (e) {
+      api.log("warn", "Couldn't look up the album of “" + title + "”: " + errorText(e));
+      return none;
+    });
+}
+
 function publishSong(title, artist) {
   if (!requireSignIn("publish")) return Promise.resolve();
   return api.cues
@@ -1176,7 +1216,7 @@ function publishSong(title, artist) {
         notify("This sheet came from the community unchanged, so it isn't yours to publish.");
         return;
       }
-      return albumArtistFor(row.title, row.artistName, row.albumName).then(function (albumArtist) {
+      return albumFor(row.title, row.artistName, row.albumName).then(function (found) {
         return request(
           "POST",
           "/v1/items",
@@ -1184,8 +1224,8 @@ function publishSong(title, artist) {
             kind: "cue_sheet",
             title: row.title,
             artistName: row.artistName,
-            albumName: row.albumName,
-            albumArtistName: albumArtist || undefined,
+            albumName: found.album || undefined,
+            albumArtistName: found.albumArtist || undefined,
             durationSecs: row.durationSecs,
             author: row.author,
             sheet: row.sheet,
@@ -1471,12 +1511,13 @@ function publishLyricsCore(title, artist, album) {
   return currentLyrics(title, artist).then(function (value) {
     if (!value || typeof value.text !== "string" || !value.text.trim()) return { status: "no-lyrics" };
     if (value.kind !== "synced") return { status: "plain-only" };
-    var body = { kind: "synced_lyrics", title: title, artistName: artist || undefined, albumName: album || undefined, lrc: value.text };
+    var body = { kind: "synced_lyrics", title: title, artistName: artist || undefined, lrc: value.text };
     var now = api.playback && api.playback.getCurrentTrack ? api.playback.getCurrentTrack() : null;
     if (now && songKey(now.title, now.artist_name) === songKey(title, artist) && now.duration_secs) body.durationSecs = now.duration_secs;
-    return albumArtistFor(title, artist, album)
-      .then(function (albumArtist) {
-        if (albumArtist) body.albumArtistName = albumArtist;
+    return albumFor(title, artist, album)
+      .then(function (found) {
+        if (found.album) body.albumName = found.album;
+        if (found.albumArtist) body.albumArtistName = found.albumArtist;
         return request("POST", "/v1/items", body, true);
       })
       .then(function (data) {

@@ -412,6 +412,28 @@ test("a compilation track is published under its album artist", async () => {
   assert.equal(body.albumArtistName, "Various Artists");
 });
 
+test("a sheet that names no album is published under the library's album, unless the song is on several", async () => {
+  const published = async (library) => {
+    const { host } = await setup({ session: SIGNED_IN });
+    host.libraryTracks = library;
+    await host.addSheet("The Eternal", "Joy Division", { cues: [{ at: 1, text: "hi" }] });
+    await host.menu["publish-cues"]({ kind: "track", title: "The Eternal", artistName: "Joy Division" });
+    const post = host.requests.find((r) => r.init.method === "POST" && new URL(r.url).pathname === "/v1/items");
+    return JSON.parse(post.init.body);
+  };
+  const closer = { id: 1, title: "The Eternal", artist_name: "Joy Division", album_title: "Closer", album_artist_name: null };
+
+  const one = await published([closer, { ...closer, id: 2, album_title: "closer" }]); // one album, two spellings of its case
+  assert.equal(one.albumName, "Closer");
+  assert.equal(one.albumArtistName, undefined);
+
+  const two = await published([closer, { ...closer, id: 3, album_title: "Substance", album_artist_name: null }]);
+  assert.equal(two.albumName, undefined, "the original or the compilation: no guess");
+
+  const other = await published([{ ...closer, artist_name: "Someone Else" }]);
+  assert.equal(other.albumName, undefined, "another artist's song of that name isn't this one");
+});
+
 test("the website's Open in Viboplr opens the subject's page", async () => {
   const { host } = await setup();
   await host.deepLink("viboplr://plugin/community/subject?id=7");
