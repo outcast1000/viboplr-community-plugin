@@ -215,42 +215,69 @@ test("likes made in the app reach Community only once switched on, as likes and 
 
 const PLAYED = { key: "q:1", title: "Jóga", artist_name: "Björk", album_title: "Homogenic", album_artist_name: "Björk" };
 
-test("plays are scrobbled only once switched on, with when they started", async () => {
+test("the manifest starts the scrobbler off in the app's Settings → Scrobbling", () => {
+  const manifest = require("../manifest.json");
+  assert.deepEqual(manifest.contributes.scrobbler, { defaultEnabled: false });
+});
+
+// The app hands a play over only when Settings → Scrobbling has Community on,
+// so every play that arrives is sent; the handler reports how it went.
+test("a play handed over is sent, with when it started, and reported as sent", async () => {
   const { host } = await setup({ session: SIGNED_IN });
   const posts = () => host.requests.filter((r) => r.url.endsWith("/v1/plays")).map((r) => JSON.parse(r.init.body).plays);
   host.position = 152;
-  await host.trackScrobbled(PLAYED);
-  await flush();
-  assert.deepEqual(posts(), [], "off by default");
-
-  await host.actions.tab({ tabId: "you" });
-  await host.actions["toggle-scrobble"]({ value: true });
-  assert.equal(host.storage.get("scrobble"), true);
   const before = Math.floor(Date.now() / 1000);
-  await host.trackScrobbled(PLAYED);
-  await flush(10);
+  const report = await host.trackScrobbled(PLAYED);
+  assert.deepEqual(report, { status: "sent", pending: 0 });
   const [[sent]] = posts();
   assert.deepEqual({ ...sent, playedAt: 0 }, { title: "Jóga", artistName: "Björk", albumName: "Homogenic", albumArtistName: "Björk", playedAt: 0 });
   assert.ok(Math.abs(sent.playedAt - (before - 152)) <= 1, "the play started 152 s before the threshold");
   assert.deepEqual(host.storage.get("playQueue"), [], "sent plays leave the queue");
+  await host.actions.tab({ tabId: "you" });
   assert.match(JSON.stringify(nodes(host.lastView(), "text")), /All your plays are sent/);
-  // A video or a song with no artist isn't a scrobble the server can take.
-  await host.trackScrobbled({ ...PLAYED, artist_name: null });
-  await flush();
+  assert.ok(!nodes(host.lastView(), "toggle").some((n) => n.action === "toggle-scrobble"), "no switch of its own");
+  // A song with no artist isn't a scrobble the server can take.
+  assert.equal((await host.trackScrobbled({ ...PLAYED, artist_name: null })).status, "skipped");
   assert.equal(posts().length, 1);
+});
+
+// An older Viboplr ignores `scrobbler.defaultEnabled` and would hand every
+// play over, so there the plugin's own opt-in switch still decides.
+test("on a Viboplr that doesn't own scrobbling, plays wait for the plugin's own switch", async () => {
+  const { host } = await setup({ session: SIGNED_IN });
+  delete host.api.playback.reportScrobble;
+  const posts = () => host.requests.filter((r) => r.url.endsWith("/v1/plays"));
+  assert.equal(await host.trackScrobbled(PLAYED), undefined);
+  await flush();
+  assert.equal(posts().length, 0, "off until switched on");
+  await host.actions.tab({ tabId: "you" });
+  assert.ok(nodes(host.lastView(), "toggle").some((n) => n.action === "toggle-scrobble"), "the switch is shown");
+  await host.actions["toggle-scrobble"]({ value: true });
+  assert.equal(host.storage.get("scrobble"), true);
+  await host.trackScrobbled(PLAYED);
+  await flush(10);
+  assert.equal(posts().length, 1);
+});
+
+test("signed out, plays wait and the report says to sign in", async () => {
+  const { host } = await setup();
+  const report = await host.trackScrobbled(PLAYED);
+  assert.deepEqual(report, { status: "queued", pending: 1, message: "Sign in to Viboplr Community to send" });
+  assert.ok(!host.requests.some((r) => r.url.endsWith("/v1/plays")));
+  assert.equal(host.storage.get("playQueue").length, 1);
 });
 
 test("plays made while Community is unreachable wait, survive a restart, and go later", async () => {
   playsServer.status = 503;
   try {
     const { host, plugin } = await setup({ session: SIGNED_IN });
-    host.storage.set("scrobble", true);
-    await plugin.deactivate();
-    await plugin.activate(host.api);
     await host.trackScrobbled(PLAYED);
-    await host.trackScrobbled({ ...PLAYED, title: "Hunter" });
+    const report = await host.trackScrobbled({ ...PLAYED, title: "Hunter" });
     await flush(10);
     assert.equal(host.storage.get("playQueue").length, 2, "kept for later");
+    assert.equal(report.status, "queued");
+    assert.equal(report.pending, 2);
+    assert.match(report.message, /Couldn't reach Viboplr Community/);
     await host.actions.tab({ tabId: "you" });
     assert.match(JSON.stringify(nodes(host.lastView(), "text")), /2 plays waiting to be sent/);
 
@@ -264,15 +291,15 @@ test("plays made while Community is unreachable wait, survive a restart, and go 
     assert.equal(posts.length, sentBefore + 1, "one batch");
     assert.deepEqual(JSON.parse(posts.at(-1).init.body).plays.map((p) => p.title), ["Jóga", "Hunter"]);
     assert.deepEqual(host.storage.get("playQueue"), []);
+    assert.deepEqual(host.scrobbleReports.at(-1), { status: "sent", pending: 0 }, "the late send is reported to the app");
   } finally {
     playsServer.status = 200;
   }
 });
 
-test("plays the server refuses, too old to send, or left when switched off are dropped", async () => {
+test("plays the server refuses or too old to send are dropped, and the app is told", async () => {
   const { host, plugin } = await setup({ session: SIGNED_IN });
   const old = Math.floor(Date.now() / 1000) - 15 * 86400;
-  host.storage.set("scrobble", true);
   host.storage.set("playQueue", [{ title: "Old", artistName: "Björk", playedAt: old }]);
   playsServer.status = 400;
   try {
@@ -281,20 +308,11 @@ test("plays the server refuses, too old to send, or left when switched off are d
     await flush(10);
     assert.ok(!host.requests.some((r) => r.url.endsWith("/v1/plays")), "a two-week-old play isn't even sent");
     assert.deepEqual(host.storage.get("playQueue"), []);
-    await host.trackScrobbled(PLAYED);
-    await flush(10);
+    assert.equal(host.scrobbleReports.at(-1).status, "failed");
+    assert.match(host.scrobbleReports.at(-1).message, /too old to send/);
+    const report = await host.trackScrobbled(PLAYED);
     assert.deepEqual(host.storage.get("playQueue"), [], "a refused batch is dropped, not retried forever");
-  } finally {
-    playsServer.status = 200;
-  }
-  playsServer.status = 503;
-  try {
-    await host.trackScrobbled(PLAYED);
-    await flush(10);
-    assert.equal(host.storage.get("playQueue").length, 1);
-    await host.actions.tab({ tabId: "you" });
-    await host.actions["toggle-scrobble"]({ value: false });
-    assert.deepEqual(host.storage.get("playQueue"), [], "switching off drops what was waiting");
+    assert.deepEqual(report, { status: "failed", message: "Viboplr Community refused 1 play", pending: 0 });
   } finally {
     playsServer.status = 200;
   }

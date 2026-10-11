@@ -100,8 +100,9 @@ function freshState() {
     // Send the likes made in the app to Community. Off by default: a like on
     // Community is public, and it names the song to the server.
     syncLikes: false,
-    // Scrobbling: send the songs played to Community. Off by default. The
-    // queue holds plays not yet sent, saved across restarts.
+    // Scrobbling (on/off is the app's Settings → Scrobbling): plays not yet
+    // sent, saved across restarts. `scrobble` is the old opt-in switch, read
+    // only on a Viboplr that doesn't own scrobbling (hostOwnsScrobbling).
     scrobble: false,
     playQueue: [],
     // Comments posted from a tab this session: the comment box's stateKey.
@@ -762,7 +763,7 @@ function completeSignIn(data) {
       render();
       // The open tab may be one only members can see; load it now.
       var m = currentModule();
-      return Promise.all([loadShared(), m && m.membersOnly ? loadTab() : null, redrawTabs(true), sendPlays()]);
+      return Promise.all([loadShared(), m && m.membersOnly ? loadTab() : null, redrawTabs(true), sendPlaysAndReport()]);
     })
     .catch(function (e) {
       render();
@@ -2843,13 +2844,17 @@ function onLikeChanged(change) {
 // Your plays: a scrobbler, like Last.fm's
 // ---------------------------------------------------------------------------
 //
-// With the switch on, every song the app counts as played (its scrobble
-// threshold: half the song or four minutes, never under 30 seconds) is sent
-// to POST /v1/plays. Community shows only totals — a song's plays and
-// listeners, the charts; a member's own list is theirs alone. Plays wait in a
-// queue saved to plugin storage until they're sent, so a play made offline
-// (or signed out, or while the server is down) goes later, at its own time.
-// From the moment it's switched on: nothing already played is sent.
+// Every song the app counts as played (its scrobble threshold: half the song
+// or four minutes, never under 30 seconds) and hands to this plugin is sent
+// to POST /v1/plays. Whether it hands them over is Viboplr's Settings →
+// Scrobbling, the only on/off: the manifest's `scrobbler.defaultEnabled:
+// false` starts this scrobbler off there until the user turns it on. Community
+// shows only totals — a song's plays and listeners, the charts; a member's own
+// list is theirs alone. Plays wait in a queue saved to plugin storage until
+// they're sent, so a play made offline (or signed out, or while the server is
+// down) goes later, at its own time. Each play's outcome goes back to the app
+// as a scrobble report — the handler's return value, and `reportScrobble`
+// when a queued batch is sent later — which is the status line under the row.
 
 var PLAY_BATCH = 50; // the server's per-request maximum
 var PLAY_QUEUE_MAX = 2000; // past this, the oldest wait in vain
@@ -2857,13 +2862,61 @@ var PLAY_MAX_AGE_SECS = 14 * 24 * 60 * 60; // the server refuses older plays
 var PLAY_RETRY_MS = 5 * 60 * 1000;
 var playRetryTimer = null;
 var playSending = null;
+// Why the last send didn't land (null when it did), and a batch the server
+// refused outright, reported once.
+var playError = null;
+var playRefused = 0;
+var playExpired = 0;
 
 function canScrobble() {
   return !!(api.playback && typeof api.playback.onTrackScrobbled === "function");
 }
 
+// A Viboplr that owns scrobbling (Settings → Scrobbling is the on/off, and it
+// honours `scrobbler.defaultEnabled: false`) has reportScrobble. An older one
+// would hand every play over by default, so there the plugin keeps its own
+// opt-in switch, as before 1.4.0 — sending plays must never start unasked.
+function hostOwnsScrobbling() {
+  return !!(api.playback && typeof api.playback.reportScrobble === "function");
+}
+
+function scrobblingOn() {
+  return hostOwnsScrobbling() || state.scrobble;
+}
+
+// What happened to the plays, as the app's Settings → Scrobbling shows it.
+function playReport() {
+  var waiting = state.playQueue.length;
+  if (playRefused) {
+    var refused = playRefused;
+    playRefused = 0;
+    return { status: "failed", message: "Viboplr Community refused " + plural(refused, "play", "plays"), pending: waiting };
+  }
+  if (playExpired) {
+    var expired = playExpired;
+    playExpired = 0;
+    return { status: "failed", message: plural(expired, "play was", "plays were") + " over two weeks old, too old to send", pending: waiting };
+  }
+  if (!waiting) return { status: "sent", pending: 0 };
+  if (!state.token) return { status: "queued", pending: waiting, message: "Sign in to Viboplr Community to send" };
+  if (playError) return { status: "queued", pending: waiting, message: "Couldn't reach Viboplr Community, trying again soon: " + playError };
+  return { status: "queued", pending: waiting };
+}
+
+// A send the handler isn't waiting for (a retry, a restart, signing in):
+// tell the app how it went. Only when there was something to send.
+function sendPlaysAndReport() {
+  if (!state.playQueue.length) return sendPlays();
+  return Promise.resolve(sendPlays()).then(function () {
+    if (api && api.playback && typeof api.playback.reportScrobble === "function") {
+      api.playback.reportScrobble(playReport());
+    }
+  });
+}
+
 function onTrackScrobbled(track) {
-  if (!state || !state.scrobble || !track || !track.title || !track.artist_name) return;
+  if (!state || !track || !scrobblingOn()) return;
+  if (!track.title || !track.artist_name) return { status: "skipped", message: "Viboplr Community needs an artist and a title" };
   var nowSecs = Math.floor(Date.now() / 1000);
   var pos = typeof api.playback.getPosition === "function" ? Number(api.playback.getPosition()) : 0;
   state.playQueue.push({
@@ -2875,7 +2928,7 @@ function onTrackScrobbled(track) {
     playedAt: nowSecs - (isFinite(pos) && pos > 0 ? Math.floor(pos) : 0),
   });
   if (state.playQueue.length > PLAY_QUEUE_MAX) state.playQueue.splice(0, state.playQueue.length - PLAY_QUEUE_MAX);
-  return savePlayQueue().then(sendPlays);
+  return savePlayQueue().then(sendPlays).then(playReport);
 }
 
 function savePlayQueue() {
@@ -2888,7 +2941,7 @@ function retryPlaysLater() {
   if (playRetryTimer) return;
   playRetryTimer = setTimeout(function () {
     playRetryTimer = null;
-    if (api) sendPlays();
+    if (api) sendPlaysAndReport();
   }, PLAY_RETRY_MS);
 }
 
@@ -2897,13 +2950,14 @@ function retryPlaysLater() {
 // sent stays, and is tried again in a few minutes or with the next play.
 function sendPlays() {
   if (playSending) return playSending;
-  if (!state.scrobble || !state.token || !state.playQueue.length) return Promise.resolve();
+  if (!scrobblingOn() || !state.token || !state.playQueue.length) return Promise.resolve();
   var oldest = Math.floor(Date.now() / 1000) - PLAY_MAX_AGE_SECS;
   var fresh = state.playQueue.filter(function (p) {
     return p.playedAt >= oldest;
   });
   if (fresh.length !== state.playQueue.length) {
     api.log("info", "Dropped " + (state.playQueue.length - fresh.length) + " plays older than two weeks: Viboplr Community no longer takes them.");
+    playExpired += state.playQueue.length - fresh.length;
     state.playQueue = fresh;
   }
   var batch = state.playQueue.slice(0, PLAY_BATCH);
@@ -2911,14 +2965,19 @@ function sendPlays() {
   playSending = request("POST", "/v1/plays", { plays: batch }, true)
     .then(
       function () {
+        playError = null;
         return true;
       },
       function (e) {
         // 400: nothing in it will ever be taken. Anything else is worth a retry.
         if (e.status === 400) {
           api.log("warn", "Viboplr Community refused " + batch.length + " plays, dropping them: " + errorText(e));
+          playError = null;
+          playRefused += batch.length;
           return true;
         }
+        // 401 signed us out; the report says to sign in instead.
+        playError = e.status === 401 ? null : errorText(e);
         if (e.status !== 401) api.log("warn", "Couldn't send plays to Viboplr Community, trying again later: " + errorText(e));
         retryPlaysLater();
         return false;
@@ -2936,10 +2995,10 @@ function sendPlays() {
   return playSending;
 }
 
+// The old switch, for a Viboplr that doesn't own scrobbling yet. Off drops
+// what was still waiting, and a pending retry.
 function setScrobble(on) {
   state.scrobble = !!on;
-  // Off means stop sending: what was still waiting is dropped with it, and
-  // so is a pending retry.
   if (!state.scrobble) {
     state.playQueue = [];
     if (playRetryTimer) clearTimeout(playRetryTimer);
@@ -2950,34 +3009,46 @@ function setScrobble(on) {
   });
 }
 
+// On a Viboplr that owns scrobbling there is no switch here: its Settings →
+// Scrobbling turns this on and off, and shows what happened to the last play.
 function scrobbleNodes() {
   if (!canScrobble()) {
     return [{ type: "text", className: "ds-muted", content: "Sending your plays needs a newer Viboplr." }];
   }
-  var nodes = [
-    {
-      type: "settings-row",
-      label: "Send my plays to Community",
-      description:
-        "Like a Last.fm scrobbler: each song you play past halfway (or four minutes) is sent to Viboplr Community. Your list of plays is only yours to see; Community shows only totals, like how often a song was played and by how many people. Songs you already played aren't sent.",
-      control: { type: "toggle", label: "", action: "toggle-scrobble", checked: state.scrobble && !!state.token, disabled: !state.token },
-    },
-  ];
-  if (!state.token) {
-    nodes.push({ type: "text", className: "ds-muted", content: "Sign in to send your plays." });
+  var owned = hostOwnsScrobbling();
+  var waiting = state.playQueue.length;
+  var row = {
+    type: "settings-row",
+    label: "Send my plays to Community",
+    description:
+      "Like a Last.fm scrobbler: each song you play past halfway (or four minutes) is sent to Viboplr Community. Your list of plays is only yours to see; Community shows only totals, like how often a song was played and by how many people. " +
+      (owned ? "Turn it on or off in Viboplr's Settings → Scrobbling, which also shows how the last play went. " : "") +
+      "Songs you already played aren't sent.",
+  };
+  if (!owned) {
+    row.control = { type: "toggle", label: "", action: "toggle-scrobble", checked: state.scrobble && !!state.token, disabled: !state.token };
+  }
+  var nodes = [row];
+  if (!owned && !state.scrobble) {
+    if (!state.token) nodes.push({ type: "text", className: "ds-muted", content: "Sign in to send your plays." });
     return nodes;
   }
-  if (state.scrobble) {
-    var waiting = state.playQueue.length;
+  if (!state.token) {
     nodes.push({
-      type: "layout",
-      direction: "horizontal",
-      children: [
-        { type: "text", className: "ds-muted", content: waiting ? plural(waiting, "play", "plays") + " waiting to be sent." : "All your plays are sent." },
-        { type: "button", label: "See your plays", action: "open-my-plays", variant: "secondary" },
-      ],
+      type: "text",
+      className: "ds-muted",
+      content: "Sign in to send your plays." + (waiting ? " " + plural(waiting, "play", "plays") + " waiting to be sent." : ""),
     });
+    return nodes;
   }
+  nodes.push({
+    type: "layout",
+    direction: "horizontal",
+    children: [
+      { type: "text", className: "ds-muted", content: waiting ? plural(waiting, "play", "plays") + " waiting to be sent." : "All your plays are sent." },
+      { type: "button", label: "See your plays", action: "open-my-plays", variant: "secondary" },
+    ],
+  });
   return nodes;
 }
 
@@ -3352,7 +3423,7 @@ var ACTIONS = {
     return setTicks(p && p.value);
   },
   "toggle-scrobble": function (p) {
-    if (!state.token) return Promise.resolve(render());
+    if (!state.token || hostOwnsScrobbling()) return Promise.resolve(render());
     return setScrobble(p && p.value);
   },
   "open-my-plays": function () {
@@ -3553,8 +3624,8 @@ function activate(pluginApi) {
     api.storage.get("lyricsImports"),
     api.storage.get("ticks"),
     api.storage.get("syncLikes"),
-    api.storage.get("scrobble"),
     api.storage.get("playQueue"),
+    api.storage.get("scrobble"),
   ]).then(function (vals) {
     var session = vals[0];
     if (session && session.token) {
@@ -3567,15 +3638,16 @@ function activate(pluginApi) {
     state.lyricsImports = vals[3] || {};
     state.ticks = vals[4] === true;
     state.syncLikes = vals[5] === true;
-    state.scrobble = vals[6] === true;
-    state.playQueue = Array.isArray(vals[7]) ? vals[7] : [];
+    // A play counted while storage was being read joins the saved ones.
+    state.playQueue = (Array.isArray(vals[6]) ? vals[6] : []).concat(state.playQueue);
+    state.scrobble = vals[7] === true;
   });
   // The song already playing: its start event came before the setting was
   // read, or not at all (the plugin was enabled or updated mid-song).
   restored.then(function () {
     if (api) loadTicks(currentTrack());
     // Plays left waiting by the last run (offline, or the app closed).
-    if (api) sendPlays();
+    if (api) sendPlaysAndReport();
   });
   restored
     .catch(function (e) {

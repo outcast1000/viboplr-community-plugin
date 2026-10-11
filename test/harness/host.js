@@ -41,6 +41,7 @@ function makeHost({ route, current = null, queue = [], appVersion = "1.0.94" } =
     // page opens, and the track-started handler.
     sectionData: [],
     markers: [],
+    scrobbleReports: [],
     entityOpens: [],
     requestedActions: [],
     trackStarted: null,
@@ -110,11 +111,14 @@ function makeHost({ route, current = null, queue = [], appVersion = "1.0.94" } =
         host.trackStarted = handler;
         return () => {};
       },
-      // host.trackScrobbled(track): the app counting a play.
+      // host.trackScrobbled(track): the app counting a play (and handing it
+      // over — Settings → Scrobbling has it on). Resolves with the report.
       onTrackScrobbled: (handler) => {
         host.trackScrobbled = handler;
         return () => {};
       },
+      // Later outcomes, newest last.
+      reportScrobble: (report) => host.scrobbleReports.push(report),
       getCurrentTrack: () => host.current,
       getQueue: () => ({ tracks: host.queue, index: 0 }),
       playTracks: (tracks, startIndex, context) => host.plays.push({ tracks, startIndex, context }),
