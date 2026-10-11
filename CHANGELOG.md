@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.4.1
+- Each permission now says why the plugin needs it, shown under it when Viboplr asks. No functional changes.
+
 ## v1.4.0
 - **On a Viboplr that manages scrobbling itself, it's switched on there, not here.** In such a Viboplr the *Send my plays to Community* switch is gone: Settings → Scrobbling is the one place to turn sending plays on or off (Audio and Video separately), and Community starts **off** there until you turn it on. If you had the old switch on, turn Viboplr Community on once in Settings → Scrobbling. On older Viboplr versions nothing changes: the switch stays here, off until you turn it on.
 - **Settings → Scrobbling shows how your plays went** (on that newer Viboplr): sent, waiting to be sent (with how many, and why — signed out, or Community unreachable and being retried), or refused by the server. Plays still wait and go later as before, and a later batch landing updates that line too.
