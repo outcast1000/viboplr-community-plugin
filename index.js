@@ -45,6 +45,10 @@
 //  - NOTHING IS ASKED WHILE MUSIC PLAYS unless the user switched it on: the
 //    Now Playing item and the seek-bar ticks (timed comments) both name every
 //    song played to the server, so both start off.
+//    The one exception is SHARED WAVEFORMS (signed in, "Share waveforms" on
+//    by default): the app asks only when it has no waveform of its own for
+//    the song, and that ask is also how the copy's format (codec, rate,
+//    depth) is counted in the public format stats.
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -52,6 +56,9 @@
 var SERVER = "https://community.viboplr.com";
 var VIEW = "community";
 var TIMEOUT_MS = 15000;
+// A waveform lookup sits in front of the app computing one, and the app gives
+// up on it after about three seconds: answer (or fail) before that.
+var WAVEFORM_LOOKUP_TIMEOUT_MS = 2500;
 var AUTH_TTL_MS = 10 * 60 * 1000;
 // Device sign-in, when the server doesn't say: RFC 8628's defaults.
 var DEVICE_POLL_DEFAULT_SECS = 5;
@@ -104,6 +111,9 @@ function freshState() {
     // Send the likes made in the app to Community. On by default (owner
     // decision, 2026-10-11): only an explicit switch-off is stored as false.
     syncLikes: true,
+    // Ask Community for a waveform the app doesn't have, and share one it
+    // computed. On by default: only an explicit switch-off is stored as false.
+    shareWaveforms: true,
     // Scrobbling (on/off is the app's Settings → Scrobbling): plays not yet
     // sent, saved across restarts. `scrobble` is the old opt-in switch, read
     // only on a Viboplr that doesn't own scrobbling (hostOwnsScrobbling).
@@ -541,13 +551,14 @@ function requestError(message, status, code) {
 
 // One request to the server. `auth` adds the bearer token and turns a 401 into
 // a signed-out state (the token was revoked or the account suspended).
-function request(method, path, body, auth) {
+// `timeoutMs` shortens the usual wait, for a caller someone is waiting on.
+function request(method, path, body, auth, timeoutMs) {
   var headers = { Accept: "application/json", "User-Agent": USER_AGENT };
   if (auth) {
     if (!state.token) return Promise.reject(requestError("Sign in with GitHub first.", 401));
     headers.Authorization = "Bearer " + state.token;
   }
-  var init = { method: method, headers: headers, timeoutMs: TIMEOUT_MS };
+  var init = { method: method, headers: headers, timeoutMs: timeoutMs || TIMEOUT_MS };
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(body);
@@ -1606,6 +1617,57 @@ function publishLyricsTool(args) {
     if (out.status === "no-lyrics") throw new Error("Viboplr has no lyrics for “" + title + "”. Nothing was published.");
     if (out.status === "plain-only") throw new Error("“" + title + "” only has plain lyrics in Viboplr; only synced lyrics can be shared. Nothing was published.");
     return { status: out.status, id: out.item.id, url: out.item.url };
+  });
+}
+
+// Read-only assistant tools over the shared waveforms and the format stats.
+// They read only — sending is the app's own on-play lookup/share, so what is
+// shared is always something Viboplr measured, never what a model typed — and
+// they ask anonymously, like the header line, so a question about a song isn't
+// tied to the signed-in account.
+
+function toolText(args, key) {
+  return args && typeof args[key] === "string" && args[key].trim() ? args[key].trim() : null;
+}
+
+// Library spelling when the song is there (what Community was told on play),
+// else the names as given.
+function toolSong(args) {
+  var title = toolText(args, "title");
+  if (!title) throw new Error("title is required.");
+  return canonicalSong(title, toolText(args, "artistName"), null);
+}
+
+function getFormatsTool(args) {
+  var kind = toolText(args, "kind") || "all";
+  if (["all", "track", "album", "artist"].indexOf(kind) < 0) throw new Error("kind must be one of all, track, album, artist.");
+  if (kind === "all") return request("GET", "/v1/formats");
+  var lookup;
+  if (kind === "track") {
+    lookup = toolSong(args).then(function (song) {
+      return resolveSubject("track", song.title, song.artist);
+    });
+  } else {
+    var name = toolText(args, "name");
+    if (!name) throw new Error("name is required for kind=" + kind + ".");
+    lookup = resolveSubject(kind, name, kind === "album" ? toolText(args, "artistName") : null);
+  }
+  return lookup.then(function (subject) {
+    if (!subject) return { found: false, copies: 0 };
+    return request("GET", "/v1/formats?" + queryString({ subject: subject.id })).then(function (stats) {
+      return Object.assign({ found: true }, stats);
+    });
+  });
+}
+
+function hasWaveformTool(args) {
+  return toolSong(args).then(function (song) {
+    return resolveSubject("track", song.title, song.artist, true).then(function (subject) {
+      var rows = (subject && Array.isArray(subject.waveforms) ? subject.waveforms : []).map(function (w) {
+        return { durationSecs: w.durationSecs, sharedBy: w.sharedBy || null };
+      });
+      return { title: song.title, artistName: song.artist, shared: rows.length > 0, waveforms: rows };
+    });
   });
 }
 
@@ -3147,6 +3209,140 @@ function tickNodes() {
 }
 
 // ---------------------------------------------------------------------------
+// Shared waveforms
+// ---------------------------------------------------------------------------
+// The app asks (onLookup) only when it has no waveform of its own for the
+// song, before computing one, and shares (onShare) only one it just computed
+// after every lookup missed. So nothing here dedupes, queues or retries: a
+// missed share just means the next member computes it. On the wire a waveform
+// is one byte per second, rms / max(rms) as 0..255, in standard base64.
+
+var B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+// The facts the server takes, in the order it documents them.
+var WAVEFORM_FACTS = ["title", "artistName", "albumName", "albumArtistName", "durationSecs", "codec", "sampleRate", "bitDepth", "channels", "bitrateKbps"];
+
+function canShareWaveforms() {
+  return !!(api && api.waveforms && typeof api.waveforms.onLookup === "function" && typeof api.waveforms.onShare === "function");
+}
+
+function base64Encode(bytes) {
+  var out = "";
+  for (var i = 0; i < bytes.length; i += 3) {
+    var left = bytes.length - i;
+    var n = (bytes[i] << 16) | ((left > 1 ? bytes[i + 1] : 0) << 8) | (left > 2 ? bytes[i + 2] : 0);
+    out += B64[(n >> 18) & 63] + B64[(n >> 12) & 63] + (left > 1 ? B64[(n >> 6) & 63] : "=") + (left > 2 ? B64[n & 63] : "=");
+  }
+  return out;
+}
+
+// Standard base64 → byte values; null for anything that isn't base64.
+function base64Decode(text) {
+  var clean = String(text).replace(/\s+/g, "").replace(/=+$/, "");
+  if (clean.length % 4 === 1 || /[^A-Za-z0-9+/]/.test(clean)) return null;
+  var out = [];
+  var bits = 0;
+  var acc = 0;
+  for (var i = 0; i < clean.length; i++) {
+    acc = ((acc << 6) | B64.indexOf(clean[i])) & 0xffff;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push((acc >> bits) & 255);
+    }
+  }
+  return out;
+}
+
+// The facts as the server takes them: only the fields that are set, or null
+// when the song can't be named (no title, artist or length).
+function waveformFacts(facts) {
+  if (!facts || !facts.title || !facts.artistName) return null;
+  if (typeof facts.durationSecs !== "number" || !(facts.durationSecs > 0)) return null;
+  var body = {};
+  WAVEFORM_FACTS.forEach(function (k) {
+    if (facts[k] !== undefined && facts[k] !== null && facts[k] !== "") body[k] = facts[k];
+  });
+  return body;
+}
+
+function waveformsOn() {
+  return !!(state && state.shareWaveforms && state.token);
+}
+
+// Raw per-second RMS → the wire's base64, or null when it's all silence (or
+// unreadable), which isn't worth sharing.
+function encodeWaveform(rms) {
+  if (!Array.isArray(rms) || !rms.length) return null;
+  var max = 0;
+  rms.forEach(function (v) {
+    if (typeof v === "number" && isFinite(v) && v > max) max = v;
+  });
+  if (!(max > 0)) return null;
+  return base64Encode(
+    rms.map(function (v) {
+      return typeof v === "number" && isFinite(v) && v > 0 ? Math.min(255, Math.round((255 * v) / max)) : 0;
+    })
+  );
+}
+
+// Never throws to the app: anything that goes wrong is a miss.
+function onWaveformLookup(facts) {
+  var body = waveformsOn() ? waveformFacts(facts) : null;
+  if (!body) return Promise.resolve(null);
+  return request("POST", "/v1/waveforms/lookup", body, true, WAVEFORM_LOOKUP_TIMEOUT_MS)
+    .then(function (data) {
+      var bytes = data && typeof data.waveform === "string" ? base64Decode(data.waveform) : null;
+      if (!bytes || !bytes.length) return null;
+      return {
+        rms: bytes.map(function (b) {
+          return b / 255;
+        }),
+      };
+    })
+    .catch(function (e) {
+      if (api) api.log("error", "Couldn't look up a shared waveform: " + errorText(e));
+      return null;
+    });
+}
+
+function onWaveformShare(facts, rms) {
+  var body = waveformsOn() ? waveformFacts(facts) : null;
+  var waveform = body ? encodeWaveform(rms) : null;
+  if (!waveform) return Promise.resolve();
+  body.waveform = waveform;
+  return request("PUT", "/v1/waveforms", body, true)
+    .then(function () {})
+    .catch(function (e) {
+      if (api) api.log("error", "Couldn't share a waveform: " + errorText(e));
+    });
+}
+
+function setShareWaveforms(on) {
+  state.shareWaveforms = !!on;
+  return api.storage.set("shareWaveforms", state.shareWaveforms).then(function () {
+    render();
+  });
+}
+
+function waveformNodes() {
+  if (!canShareWaveforms()) {
+    return [{ type: "text", className: "ds-muted", content: "Sharing waveforms needs a newer Viboplr." }];
+  }
+  var nodes = [
+    {
+      type: "settings-row",
+      label: "Share waveforms",
+      description:
+        "When you play a song Viboplr has no waveform for, it asks Viboplr Community for one. If nobody has shared it yet and Viboplr works it out itself, it's shared for the next listener. Each ask also counts your copy's format (codec, sample rate, bit depth) in Community's public format stats — never file names or sizes.",
+      control: { type: "toggle", label: "", action: "toggle-share-waveforms", checked: state.shareWaveforms && !!state.token, disabled: !state.token },
+    },
+  ];
+  if (!state.token) nodes.push({ type: "text", className: "ds-muted", content: "Sign in to share waveforms." });
+  return nodes;
+}
+
+// ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
@@ -3251,6 +3447,7 @@ function settingsNodes() {
   var nodes = [
     { type: "section", title: "While you listen", children: tickNodes() },
     { type: "section", title: "Send from Viboplr", children: scrobbleNodes().concat(likeSyncNodes()) },
+    { type: "section", title: "Share with Viboplr Community", children: waveformNodes() },
   ];
   if (versionAtLeast(api.appVersion, EXTENSION_SETTINGS_MIN_APP)) {
     nodes.push({
@@ -3525,6 +3722,10 @@ var ACTIONS = {
     if (!state.token) return Promise.resolve(render());
     return setSyncLikes(p && p.value);
   },
+  "toggle-share-waveforms": function (p) {
+    if (!state.token) return Promise.resolve(render());
+    return setShareWaveforms(p && p.value);
+  },
   "open-my-page": function () {
     return api.network.openUrl(SERVER + "/me");
   },
@@ -3689,6 +3890,8 @@ function activate(pluginApi) {
   });
   if (api.assistant && typeof api.assistant.onTool === "function") {
     api.assistant.onTool("publish_lyrics", publishLyricsTool);
+    api.assistant.onTool("get_formats", getFormatsTool);
+    api.assistant.onTool("has_waveform", hasWaveformTool);
   }
   api.contextMenu.onAction("publish-lyrics", function (target) {
     if (!target || !target.title) return;
@@ -3708,6 +3911,11 @@ function activate(pluginApi) {
   }
   if (canSyncLikes()) api.library.onLikeChanged(onLikeChanged);
   if (canScrobble()) api.playback.onTrackScrobbled(onTrackScrobbled);
+  // An older Viboplr has no api.waveforms and simply never asks.
+  if (canShareWaveforms()) {
+    api.waveforms.onLookup(onWaveformLookup);
+    api.waveforms.onShare(onWaveformShare);
+  }
 
   var restored = Promise.all([
     api.storage.get("session"),
@@ -3718,6 +3926,7 @@ function activate(pluginApi) {
     api.storage.get("syncLikes"),
     api.storage.get("playQueue"),
     api.storage.get("scrobble"),
+    api.storage.get("shareWaveforms"),
   ]).then(function (vals) {
     var session = vals[0];
     if (session && session.token) {
@@ -3733,6 +3942,7 @@ function activate(pluginApi) {
     // A play counted while storage was being read joins the saved ones.
     state.playQueue = (Array.isArray(vals[6]) ? vals[6] : []).concat(state.playQueue);
     state.scrobble = vals[7] === true;
+    state.shareWaveforms = vals[8] !== false;
   });
   // The song already playing: its start event came before the setting was
   // read, or not at all (the plugin was enabled or updated mid-song).
@@ -3776,6 +3986,9 @@ return {
   // Exposed for tests.
   _songKey: songKey,
   _base64url: base64url,
+  _base64Encode: base64Encode,
+  _base64Decode: base64Decode,
+  _encodeWaveform: encodeWaveform,
   _parseLink: parseLink,
   _importAuthor: importAuthor,
   _cardRow: function (m, item) {

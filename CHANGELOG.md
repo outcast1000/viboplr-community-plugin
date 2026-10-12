@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+- **Shared waveforms** (Settings → *Share with Viboplr Community* → *Share waveforms*, on by default, signed in only): when you play a song Viboplr has no waveform for, it asks Viboplr Community for one first, so streamed copies get a waveform too. If nobody has shared one and Viboplr works it out itself, it's shared for the next listener. Each ask also counts your copy's format (codec, sample rate, bit depth) in Community's public format stats; file names and sizes are never sent. A song whose waveform Viboplr already has is never asked about. Needs a Viboplr with plugin waveforms; older ones say so in the same place.
+- **Two read-only assistant tools.** `get_formats` answers which formats members hold a song, album or artist in (or all of Community), and `has_waveform` whether a waveform is shared for a song and for which lengths. Both only read and ask without your account, so an assistant can use them without the *Plugin actions* switch. There is deliberately no tool to send a waveform or a format: what's shared is always what Viboplr measured.
+
 ## v1.5.1
 - **Songs are filed under their album when you publish.** A cue sheet or synced lyrics that names no album (an assistant-written sheet often doesn't) is now published under the album your library has the song on, so it shows under that album on the artist's Community page instead of under no album at all. A song your library has on more than one album (the original and a compilation) is published without one rather than guessed. To fix a song already shared under no album, publish it again.
 

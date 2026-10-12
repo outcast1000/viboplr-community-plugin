@@ -3,7 +3,8 @@
 // network.fetch with `{ status, body }` (body is JSON-encoded) or undefined
 // for a 404.
 
-function makeHost({ route, current = null, queue = [], appVersion = "1.0.94" } = {}) {
+// `waveforms: false` is an app from before api.waveforms (it never asks).
+function makeHost({ route, current = null, queue = [], appVersion = "1.0.94", waveforms = true } = {}) {
   const host = {
     requests: [],
     opened: [],
@@ -233,6 +234,30 @@ function makeHost({ route, current = null, queue = [], appVersion = "1.0.94" } =
       },
     },
   };
+
+  // The app's waveform chain: host.waveformLookup(facts) is a local miss
+  // before computing, host.waveformShare(facts, rms) one it just computed.
+  // Each resolves with what the plugin's handler did.
+  host.waveformLookupHandler = null;
+  host.waveformShareHandler = null;
+  if (waveforms) {
+    host.api.waveforms = {
+      onLookup: (handler) => {
+        host.waveformLookupHandler = handler;
+        return () => {
+          host.waveformLookupHandler = null;
+        };
+      },
+      onShare: (handler) => {
+        host.waveformShareHandler = handler;
+        return () => {
+          host.waveformShareHandler = null;
+        };
+      },
+    };
+  }
+  host.waveformLookup = (facts) => Promise.resolve(host.waveformLookupHandler ? host.waveformLookupHandler(facts) : null);
+  host.waveformShare = (facts, rms) => Promise.resolve(host.waveformShareHandler ? host.waveformShareHandler(facts, rms) : undefined);
 
   host.current = current;
   host.lastView = () => host.views[host.views.length - 1].data;

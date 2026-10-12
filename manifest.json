@@ -24,11 +24,11 @@
     "playback:markers"
   ],
   "permissionReasons": {
-    "network:community.viboplr.com": "Browse and import what's shared, publish your own, like and comment, and send plays and likes when switched on",
+    "network:community.viboplr.com": "Browse and import what's shared, publish your own, like and comment, and send plays, likes and waveforms when switched on",
     "system:open": "Sign in with GitHub in your browser, and open Community pages on the website",
     "cues:read": "Check for a cue sheet before an import replaces it, and list your own sheets so you can publish them",
     "cues:write": "Install a shared cue sheet you chose to import",
-    "playback:read": "Find what's shared for the playing song, pin a comment to its current moment, publish your queue and send plays",
+    "playback:read": "Find what's shared for the playing song, pin a comment to its current moment, publish your queue, send plays, and look up or share its waveform when switched on",
     "playback:control": "Play a mixtape you chose",
     "library:read": "Read playlists and cached lyrics you publish, match songs to your library, and send likes when switched on",
     "library:write": "Save a mixtape you chose to your playlists, and replace it with its newer version when you update it",
@@ -43,9 +43,39 @@
     "scrobbler": {
       "defaultEnabled": false
     },
+    "waveformProvider": {
+      "name": "Viboplr Community"
+    },
     "assistant": {
-      "instructions": "Viboplr Community shares cue sheets, synced lyrics and mixtapes between users. publish_lyrics sends the synced lyrics Viboplr already has for a song to the community server, under the signed-in user's account. It never takes lyrics from you: to share lyrics you have fixed, save them for the song in Viboplr first. Check with get_lyrics that the song has kind=synced, and only publish when the user asked. It fails, with the reason, when the user isn't signed in (you can't sign in for them), the song has no lyrics, or they are plain.",
+      "instructions": "Viboplr Community shares cue sheets, synced lyrics and mixtapes between users. publish_lyrics sends the synced lyrics Viboplr already has for a song to the community server, under the signed-in user's account. It never takes lyrics from you: to share lyrics you have fixed, save them for the song in Viboplr first. Check with get_lyrics that the song has kind=synced, and only publish when the user asked. It fails, with the reason, when the user isn't signed in (you can't sign in for them), the song has no lyrics, or they are plain. get_formats and has_waveform only read: which formats members hold a song, album or artist in (counted once per member per format, from what their Viboplr measured), and whether a waveform is shared for a song. Neither needs sign-in. There is no tool to send a waveform or a format: Viboplr does that itself when a song plays without a waveform, if the user left Share waveforms on.",
       "tools": [
+        {
+          "name": "get_formats",
+          "description": "Format stats from Viboplr Community: how many copies members hold, by quality tier (hires / lossless / lossy / unknown), codec, sample rate and bit depth. kind=all (default) is every song; kind=track needs title (+ artistName); kind=album needs name (+ artistName, the album artist); kind=artist needs name. Returns { found, copies, members, tiers, codecs, sampleRates, bitDepths } — found=false when Community knows nothing of it.",
+          "readOnly": true,
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "kind": { "type": "string", "enum": ["all", "track", "album", "artist"], "description": "What to count; default all" },
+              "title": { "type": "string", "description": "Song title (kind=track)" },
+              "name": { "type": "string", "description": "Album or artist name (kind=album / artist)" },
+              "artistName": { "type": "string", "description": "Song artist (track) or album artist (album)" }
+            }
+          }
+        },
+        {
+          "name": "has_waveform",
+          "description": "Whether Viboplr Community has a shared seek-bar waveform for a song, one per recording length. Returns { title, artistName, shared, waveforms: [{ durationSecs, sharedBy }] }.",
+          "readOnly": true,
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "title": { "type": "string", "description": "Song title" },
+              "artistName": { "type": "string", "description": "Song artist" }
+            },
+            "required": ["title"]
+          }
+        },
         {
           "name": "publish_lyrics",
           "description": "Publish the synced lyrics Viboplr has for a song to Viboplr Community (an update if already shared). Returns { status: \"published\" | \"updated\", id, url }. Needs the user signed in to Community; fails when the song has no synced lyrics.",
