@@ -48,7 +48,9 @@
 //    The one exception is SHARED WAVEFORMS (signed in, "Share waveforms" on
 //    by default): the app asks only when it has no waveform of its own for
 //    the song, and that ask is also how the copy's format (codec, rate,
-//    depth) is counted in the public format stats.
+//    depth) is counted in the public format stats. It goes as the member, so
+//    Community keeps a private record of which songs they hold in what
+//    format (Settings says so; Delete my play history removes it).
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -59,6 +61,10 @@ var TIMEOUT_MS = 15000;
 // A waveform lookup sits in front of the app computing one, and the app gives
 // up on it after about three seconds: answer (or fail) before that.
 var WAVEFORM_LOOKUP_TIMEOUT_MS = 2500;
+// Of that, at most this long waiting for the session to be read back at
+// startup, and never less than this left for the request itself.
+var WAVEFORM_RESTORE_WAIT_MS = 1000;
+var WAVEFORM_LOOKUP_MIN_MS = 1500;
 var AUTH_TTL_MS = 10 * 60 * 1000;
 // Device sign-in, when the server doesn't say: RFC 8628's defaults.
 var DEVICE_POLL_DEFAULT_SECS = 5;
@@ -114,6 +120,18 @@ function freshState() {
     // Ask Community for a waveform the app doesn't have, and share one it
     // computed. On by default: only an explicit switch-off is stored as false.
     shareWaveforms: true,
+    // Shared cue sheets in Now Playing: "off" | "notify" | "auto".
+    cueSuggest: "notify",
+    // Songs already checked (song key → when), so each is offered once.
+    cueAsked: {},
+    // Songs being checked right now (song key → true), so a context change
+    // and a track start arriving together ask once. Not saved.
+    cueChecking: {},
+    // What each "shared cue sheet" toast offers, by song key → { id, title }.
+    cueSuggestions: {},
+    // activate()'s storage restore, which a handler the app may call before
+    // it finishes (the waveform lookup) waits for.
+    restored: null,
     // Scrobbling (on/off is the app's Settings → Scrobbling): plays not yet
     // sent, saved across restarts. `scrobble` is the old opt-in switch, read
     // only on a Viboplr that doesn't own scrobbling (hostOwnsScrobbling).
@@ -536,6 +554,7 @@ function notify(message, options) {
 }
 
 function fail(what, e) {
+  if (!api) return; // deactivated mid-request
   api.log("error", what + ": " + errorText(e));
   notify(what + ": " + errorText(e));
 }
@@ -1091,19 +1110,31 @@ function registerSongCounts() {
 // ---------------------------------------------------------------------------
 
 // Import a community sheet. Asks first when it would replace a local sheet
-// that isn't this same item, untouched.
-function importItem(id, confirmed) {
+// that isn't this same item, untouched. A suggested sheet (`opts.suggestion`:
+// "toast" for the toast's Import, "auto" for Import automatically) never asks:
+// the user didn't pick it on its page, so when the song has a sheet by now it
+// is left alone — and the toast path says so. Resolves with what happened:
+// "imported", "own" (skipped: the song has a sheet), "confirm" (the in-view
+// question is up) or "failed".
+function importItem(id, confirmed, opts) {
+  var suggestion = (opts && opts.suggestion) || null;
   return request("GET", "/v1/items/" + encodeURIComponent(id))
     .then(function (data) {
+      if (!api) return "failed";
       var item = data.item;
       var key = songKey(item.title, item.artistName);
       return api.cues.get(item.title, item.artistName).then(function (existing) {
+        if (!api) return "failed";
+        if (existing && suggestion) {
+          if (suggestion === "toast") notify("You have your own cue sheet for “" + item.title + "” now — nothing was imported.");
+          return "own";
+        }
         var rec = state.imports[key];
         var sameImport = rec && existing && rec.id === item.id && rec.updatedAt === existing.updatedAt;
         if (existing && !confirmed && !sameImport) {
           state.confirm = { kind: "replace", id: item.id, title: item.title, artist: item.artistName, by: item.publisher.login };
           render();
-          return;
+          return "confirm";
         }
         var meta = { author: importAuthor(item) };
         if (item.albumName) meta.albumName = item.albumName;
@@ -1112,18 +1143,21 @@ function importItem(id, confirmed) {
           .set(item.title, item.artistName, item.payload, meta)
           .then(function (row) {
             state.imports[key] = { id: item.id, version: item.version, updatedAt: row.updatedAt };
-            return api.storage.set("imports", state.imports);
+            return api ? api.storage.set("imports", state.imports) : null;
           })
           .then(function () {
+            if (!api) return "imported";
             countUse(item.id);
             state.local = null;
             notify("Imported the cue sheet for “" + item.title + "”. It plays in Now Playing.");
             render();
+            return "imported";
           });
       });
     })
     .catch(function (e) {
       fail("Couldn't import that cue sheet", e);
+      return "failed";
     });
 }
 
@@ -1641,7 +1675,11 @@ function toolSong(args) {
 function getFormatsTool(args) {
   var kind = toolText(args, "kind") || "all";
   if (["all", "track", "album", "artist"].indexOf(kind) < 0) throw new Error("kind must be one of all, track, album, artist.");
-  if (kind === "all") return request("GET", "/v1/formats");
+  if (kind === "all") {
+    return request("GET", "/v1/formats").then(function (stats) {
+      return Object.assign({ found: true }, stats);
+    });
+  }
   var lookup;
   if (kind === "track") {
     lookup = toolSong(args).then(function (song) {
@@ -1654,9 +1692,16 @@ function getFormatsTool(args) {
   }
   return lookup.then(function (subject) {
     if (!subject) return { found: false, copies: 0 };
-    return request("GET", "/v1/formats?" + queryString({ subject: subject.id })).then(function (stats) {
-      return Object.assign({ found: true }, stats);
-    });
+    return request("GET", "/v1/formats?" + queryString({ subject: subject.id })).then(
+      function (stats) {
+        return Object.assign({ found: true }, stats);
+      },
+      function (e) {
+        // Known as a subject, but no copy of it counted yet.
+        if (e && e.status === 404) return { found: false, copies: 0 };
+        throw e;
+      }
+    );
   });
 }
 
@@ -1664,7 +1709,8 @@ function hasWaveformTool(args) {
   return toolSong(args).then(function (song) {
     return resolveSubject("track", song.title, song.artist, true).then(function (subject) {
       var rows = (subject && Array.isArray(subject.waveforms) ? subject.waveforms : []).map(function (w) {
-        return { durationSecs: w.durationSecs, sharedBy: w.sharedBy || null };
+        // Who shared it isn't said: the server doesn't tell.
+        return { durationSecs: w.durationSecs };
       });
       return { title: song.title, artistName: song.artist, shared: rows.length > 0, waveforms: rows };
     });
@@ -3209,6 +3255,201 @@ function tickNodes() {
 }
 
 // ---------------------------------------------------------------------------
+// Shared cue sheets in Now Playing
+// ---------------------------------------------------------------------------
+// While Now Playing is on screen (api.ui.getContext — the window visible, not
+// just the view selected), signed in, and the song has no cue sheet of yours,
+// ask Community whether one is shared that fits this recording, and offer it
+// (a toast with Import) or import it, per the setting. Asked without the
+// account token, like every other on-play lookup: being signed in is the gate,
+// not something the server is told. Each song is checked once, ever, once the
+// check has an answer — an ignored offer isn't repeated on the next play, but
+// a lookup that failed is.
+
+var CUE_SUGGEST_MODES = ["off", "notify", "auto"];
+// How far a sheet's timing may be from the playing copy and still fit: a
+// sheet timed to the album take puts every card in the wrong place on a live one.
+var CUE_FIT_TOLERANCE_SECS = 3;
+var CUE_ASKED_MAX = 1000;
+// Cue cards play over the audio Now Playing view only.
+var VIDEO_FORMATS = ["mp4", "m4v", "mkv", "webm", "mov", "avi", "wmv"];
+
+function canSuggestCues() {
+  return !!(api && api.ui && typeof api.ui.getContext === "function" && typeof api.ui.onContextChanged === "function" && api.cues);
+}
+
+function nowPlayingOnScreen(ctx) {
+  return !!(ctx && ctx.nowPlaying && ctx.nowPlaying.visible && ctx.window && ctx.window.visible);
+}
+
+function isVideoTrack(track) {
+  var f = (track.format || "").toLowerCase();
+  if (f) return VIDEO_FORMATS.indexOf(f) >= 0;
+  var m = /\.([a-z0-9]+)(?:[?#].*)?$/i.exec(track.path || "");
+  return !!m && VIDEO_FORMATS.indexOf(m[1].toLowerCase()) >= 0;
+}
+
+// The shared sheets for the playing copy, split by how sure the fit is:
+// `exact` were timed within the tolerance of `durationSecs`; `unknown` can't
+// be checked, because the playing copy or the sheet has no length. Only an
+// exact fit is ever imported on its own; an unknown one may be offered, saying so.
+function fittingSheets(items, durationSecs) {
+  var out = { exact: [], unknown: [] };
+  (items || []).forEach(function (it) {
+    if (!(durationSecs > 0) || !(it.durationSecs > 0)) out.unknown.push(it);
+    else if (Math.abs(it.durationSecs - durationSecs) <= CUE_FIT_TOLERANCE_SECS) out.exact.push(it);
+  });
+  return out;
+}
+
+function rememberCueAsked(key) {
+  if (!api) return Promise.resolve();
+  state.cueAsked[key] = Date.now();
+  var keys = Object.keys(state.cueAsked);
+  if (keys.length > CUE_ASKED_MAX) {
+    keys.sort(function (a, b) { return state.cueAsked[a] - state.cueAsked[b]; });
+    keys.slice(0, keys.length - CUE_ASKED_MAX).forEach(function (k) { delete state.cueAsked[k]; });
+  }
+  return api.storage.set("cueAsked", state.cueAsked).catch(function (e) {
+    if (api) api.log("warn", "Couldn't remember which songs were checked for cue sheets: " + errorText(e));
+  });
+}
+
+// What the toast offers, for its Import (keyed by song: see "import-suggested-cue").
+var CUE_SUGGESTIONS_MAX = 20;
+
+function rememberCueSuggestion(key, item) {
+  delete state.cueSuggestions[key];
+  state.cueSuggestions[key] = { id: item.id, title: item.title };
+  var keys = Object.keys(state.cueSuggestions);
+  keys.slice(0, Math.max(0, keys.length - CUE_SUGGESTIONS_MAX)).forEach(function (k) {
+    delete state.cueSuggestions[k];
+  });
+}
+
+function playingSongKey() {
+  var now = currentTrack();
+  return now && now.title ? songKey(now.title, now.artist_name) : null;
+}
+
+// A song counts as asked (and isn't asked again) only once the check has an
+// answer: the user has a sheet of their own, nothing fits, or one was offered
+// or imported. A failed lookup, a failed import or a song that stopped
+// playing meanwhile leaves it unasked, so a later look tries again.
+function checkSharedCues(ctx) {
+  if (!api || !canSuggestCues() || state.cueSuggest === "off" || !state.token) return Promise.resolve();
+  if (!nowPlayingOnScreen(ctx)) return Promise.resolve();
+  var track = currentTrack();
+  if (!track || !track.title || !track.artist_name || isVideoTrack(track)) return Promise.resolve();
+  var title = track.title;
+  var artist = track.artist_name;
+  var key = songKey(title, artist);
+  if (state.cueAsked[key] || state.cueChecking[key]) return Promise.resolve();
+  state.cueChecking[key] = true;
+  return api.cues
+    .get(title, artist)
+    .then(function (own) {
+      if (own) return rememberCueAsked(key); // the user's own sheet always wins
+      return request("GET", "/v1/items?" + queryString({ kind: "cue_sheet", title: title, artist: artist })).then(function (data) {
+        if (!api || playingSongKey() !== key) return; // moved on meanwhile: ask again next time
+        // Never offer the user a sheet they published themselves.
+        var me = state.user && state.user.login;
+        var items = ((data && data.items) || []).filter(function (it) {
+          return !(me && it.publisher && it.publisher.login === me);
+        });
+        // The server lists the most imported first, newest on a tie.
+        var fits = fittingSheets(items, track.duration_secs);
+        if (state.cueSuggest === "auto") {
+          if (!fits.exact.length) return rememberCueAsked(key);
+          return importItem(fits.exact[0].id, false, { suggestion: "auto" }).then(function (result) {
+            if (result === "imported" || result === "own") return rememberCueAsked(key);
+          });
+        }
+        var best = fits.exact[0] || fits.unknown[0];
+        if (!best) return rememberCueAsked(key);
+        rememberCueSuggestion(key, best);
+        var by = best.publisher && best.publisher.login ? " by @" + best.publisher.login : "";
+        var unchecked = fits.exact.length ? "" : " (its timing couldn't be checked against this copy)";
+        var others = fits.exact.length + fits.unknown.length - 1;
+        var more = others > 0 ? " (" + others + " more on its Community tab)" : "";
+        notify("A cue sheet" + by + " is shared for “" + title + "”" + unchecked + more + ".", {
+          action: { label: "Import", id: "import-suggested-cue" },
+        });
+        return rememberCueAsked(key);
+      });
+    })
+    .catch(function (e) {
+      if (api) api.log("warn", "Couldn't check Community for a shared cue sheet: " + errorText(e));
+    })
+    .then(function () {
+      delete state.cueChecking[key];
+    });
+}
+
+// The toast's Import. The host runs a toast's button as the plugin's UI action
+// with no payload, and a UI action can't be unregistered, so one fixed action
+// serves every toast: it imports what was offered for the song playing NOW,
+// and nothing when that song has no offer (a stale toast from an earlier song).
+function importSuggestedCue() {
+  var key = playingSongKey();
+  var offer = key ? state.cueSuggestions[key] : null;
+  if (!offer) {
+    notify("That cue sheet was for a song that isn't playing any more. Find it on the song's Community tab.");
+    return Promise.resolve();
+  }
+  delete state.cueSuggestions[key];
+  return importItem(offer.id, false, { suggestion: "toast" }).then(function (result) {
+    // A failed import can be tried again from the same toast.
+    if (result === "failed" && api) state.cueSuggestions[key] = offer;
+  });
+}
+
+function checkSharedCuesNow() {
+  if (!canSuggestCues()) return Promise.resolve();
+  return Promise.resolve(api.ui.getContext())
+    .then(checkSharedCues)
+    .catch(function (e) {
+      if (api) api.log("warn", "Couldn't read what's on screen: " + errorText(e));
+    });
+}
+
+function setCueSuggest(mode) {
+  state.cueSuggest = CUE_SUGGEST_MODES.indexOf(mode) >= 0 ? mode : "notify";
+  return api.storage.set("cueSuggest", state.cueSuggest).then(function () {
+    render();
+    // Switched on while Now Playing is up: the playing song is the first one.
+    if (state.cueSuggest !== "off") return checkSharedCuesNow();
+  });
+}
+
+function cueSuggestNodes() {
+  if (!canSuggestCues()) {
+    return [{ type: "text", className: "ds-muted", content: "Shared cue sheets in Now Playing need a newer Viboplr." }];
+  }
+  var nodes = [
+    {
+      type: "settings-row",
+      label: "Shared cue sheets in Now Playing",
+      description:
+        "While Now Playing is on screen and a song has no cue sheet of yours, Viboplr Community is asked whether one is shared that fits this recording. Each song is asked about once. Your own cue sheet always wins.",
+      control: {
+        type: "select",
+        label: "",
+        action: "set-cue-suggest",
+        value: state.cueSuggest,
+        options: [
+          { value: "off", label: "Off" },
+          { value: "notify", label: "Notify me" },
+          { value: "auto", label: "Import automatically" },
+        ],
+      },
+    },
+  ];
+  if (!state.token) nodes.push({ type: "text", className: "ds-muted", content: "Sign in to get shared cue sheets in Now Playing." });
+  return nodes;
+}
+
+// ---------------------------------------------------------------------------
 // Shared waveforms
 // ---------------------------------------------------------------------------
 // The app asks (onLookup) only when it has no waveform of its own for the
@@ -3286,36 +3527,66 @@ function encodeWaveform(rms) {
   );
 }
 
+// The app can ask before activate() has read the session and the switch back
+// from storage (the song that was playing when the app started): wait for that,
+// but no longer than `maxMs`, so the lookup still answers inside its budget.
+function whenRestored(maxMs) {
+  var restored = state && state.restored;
+  if (!restored) return Promise.resolve();
+  return new Promise(function (resolve) {
+    var timer = setTimeout(resolve, maxMs);
+    var done = function () {
+      clearTimeout(timer);
+      resolve();
+    };
+    restored.then(done, done);
+  });
+}
+
+// A lookup or share that failed for the usual reasons — offline, a timeout,
+// the server busy (429) or down (5xx) — is routine and logs as a warning;
+// anything else (a 4xx the server shouldn't send us) is an error.
+function routineFailure(e) {
+  var status = e && e.status;
+  return !status || status === 401 || status === 408 || status === 429 || status >= 500;
+}
+
 // Never throws to the app: anything that goes wrong is a miss.
 function onWaveformLookup(facts) {
-  var body = waveformsOn() ? waveformFacts(facts) : null;
-  if (!body) return Promise.resolve(null);
-  return request("POST", "/v1/waveforms/lookup", body, true, WAVEFORM_LOOKUP_TIMEOUT_MS)
-    .then(function (data) {
-      var bytes = data && typeof data.waveform === "string" ? base64Decode(data.waveform) : null;
-      if (!bytes || !bytes.length) return null;
-      return {
-        rms: bytes.map(function (b) {
-          return b / 255;
-        }),
-      };
-    })
-    .catch(function (e) {
-      if (api) api.log("error", "Couldn't look up a shared waveform: " + errorText(e));
-      return null;
-    });
+  var started = Date.now();
+  return whenRestored(WAVEFORM_RESTORE_WAIT_MS).then(function () {
+    var body = api && waveformsOn() ? waveformFacts(facts) : null;
+    if (!body) return null;
+    var left = Math.max(WAVEFORM_LOOKUP_MIN_MS, WAVEFORM_LOOKUP_TIMEOUT_MS - (Date.now() - started));
+    return request("POST", "/v1/waveforms/lookup", body, true, left)
+      .then(function (data) {
+        var bytes = data && typeof data.waveform === "string" ? base64Decode(data.waveform) : null;
+        if (!bytes || !bytes.length) return null;
+        return {
+          rms: bytes.map(function (b) {
+            return b / 255;
+          }),
+        };
+      })
+      .catch(function (e) {
+        if (api) api.log(routineFailure(e) ? "warn" : "error", "Couldn't look up a shared waveform: " + errorText(e));
+        return null;
+      });
+  });
 }
 
 function onWaveformShare(facts, rms) {
-  var body = waveformsOn() ? waveformFacts(facts) : null;
-  var waveform = body ? encodeWaveform(rms) : null;
-  if (!waveform) return Promise.resolve();
-  body.waveform = waveform;
-  return request("PUT", "/v1/waveforms", body, true)
-    .then(function () {})
-    .catch(function (e) {
-      if (api) api.log("error", "Couldn't share a waveform: " + errorText(e));
-    });
+  return whenRestored(WAVEFORM_RESTORE_WAIT_MS).then(function () {
+    var body = api && waveformsOn() ? waveformFacts(facts) : null;
+    var waveform = body ? encodeWaveform(rms) : null;
+    if (!waveform) return;
+    body.waveform = waveform;
+    return request("PUT", "/v1/waveforms", body, true)
+      .then(function () {})
+      .catch(function (e) {
+        if (api) api.log(routineFailure(e) ? "warn" : "error", "Couldn't share a waveform: " + errorText(e));
+      });
+  });
 }
 
 function setShareWaveforms(on) {
@@ -3334,7 +3605,7 @@ function waveformNodes() {
       type: "settings-row",
       label: "Share waveforms",
       description:
-        "When you play a song Viboplr has no waveform for, it asks Viboplr Community for one. If nobody has shared it yet and Viboplr works it out itself, it's shared for the next listener. Each ask also counts your copy's format (codec, sample rate, bit depth) in Community's public format stats — never file names or sizes.",
+        "When you play a song Viboplr has no waveform for, it asks Viboplr Community for one. If nobody has shared it yet and Viboplr works it out itself, it's shared for the next listener. Each ask and each share is sent under your Community account, and Community keeps a record of which songs you hold and in what format (codec, sample rate, bit depth). That record is private to you, and Delete my play history on the website removes it. Your copy's format is also counted, without your name, in Community's public format stats. File names and sizes are never sent.",
       control: { type: "toggle", label: "", action: "toggle-share-waveforms", checked: state.shareWaveforms && !!state.token, disabled: !state.token },
     },
   ];
@@ -3445,7 +3716,7 @@ function noticeNodes(m) {
 // (permissions, which menu items and views show) on its Extensions page.
 function settingsNodes() {
   var nodes = [
-    { type: "section", title: "While you listen", children: tickNodes() },
+    { type: "section", title: "While you listen", children: tickNodes().concat(cueSuggestNodes()) },
     { type: "section", title: "Send from Viboplr", children: scrobbleNodes().concat(likeSyncNodes()) },
     { type: "section", title: "Share with Viboplr Community", children: waveformNodes() },
   ];
@@ -3726,6 +3997,13 @@ var ACTIONS = {
     if (!state.token) return Promise.resolve(render());
     return setShareWaveforms(p && p.value);
   },
+  "set-cue-suggest": function (p) {
+    return setCueSuggest(p && p.value);
+  },
+  // The "shared cue sheet" toast's button.
+  "import-suggested-cue": function () {
+    return importSuggestedCue();
+  },
   "open-my-page": function () {
     return api.network.openUrl(SERVER + "/me");
   },
@@ -3907,8 +4185,12 @@ function activate(pluginApi) {
   if (api.playback && typeof api.playback.onTrackStarted === "function") {
     api.playback.onTrackStarted(function (track) {
       loadTicks(track);
+      // A new song while Now Playing is already up.
+      checkSharedCuesNow();
     });
   }
+  // Now Playing coming on screen (the view, fullscreen, or the window returning).
+  if (canSuggestCues()) api.ui.onContextChanged(checkSharedCues);
   if (canSyncLikes()) api.library.onLikeChanged(onLikeChanged);
   if (canScrobble()) api.playback.onTrackScrobbled(onTrackScrobbled);
   // An older Viboplr has no api.waveforms and simply never asks.
@@ -3927,6 +4209,8 @@ function activate(pluginApi) {
     api.storage.get("playQueue"),
     api.storage.get("scrobble"),
     api.storage.get("shareWaveforms"),
+    api.storage.get("cueSuggest"),
+    api.storage.get("cueAsked"),
   ]).then(function (vals) {
     var session = vals[0];
     if (session && session.token) {
@@ -3943,11 +4227,18 @@ function activate(pluginApi) {
     state.playQueue = (Array.isArray(vals[6]) ? vals[6] : []).concat(state.playQueue);
     state.scrobble = vals[7] === true;
     state.shareWaveforms = vals[8] !== false;
+    state.cueSuggest = CUE_SUGGEST_MODES.indexOf(vals[9]) >= 0 ? vals[9] : "notify";
+    // A song checked before this run started stays checked.
+    state.cueAsked = Object.assign(vals[10] && typeof vals[10] === "object" ? vals[10] : {}, state.cueAsked);
   });
+  // The waveform handlers above can be called before this lands.
+  state.restored = restored;
   // The song already playing: its start event came before the setting was
   // read, or not at all (the plugin was enabled or updated mid-song).
   restored.then(function () {
     if (api) loadTicks(currentTrack());
+    // Now Playing may already be on screen (enabled or updated mid-song).
+    if (api) checkSharedCuesNow();
     // Plays left waiting by the last run (offline, or the app closed).
     if (api) sendPlaysAndReport();
   });

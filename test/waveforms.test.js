@@ -100,9 +100,28 @@ test("a hit decodes to per-second rms in 0..1", async () => {
 test("a miss or a failure is null, logged and never thrown", async () => {
   const { plugin, host, server } = await setup({ session: SIGNED_IN });
   assert.equal(await host.waveformLookup(FACTS), null);
+  // A server that's down is routine: a warning, not an error.
   server.status = 503;
   assert.equal(await host.waveformLookup(FACTS), null);
+  assert.ok(host.logs.some((l) => l.level === "warn" && /waveform/.test(l.message)));
+  assert.ok(!host.logs.some((l) => l.level === "error"));
+  // A request the server rejects as malformed is ours to fix: an error.
+  server.status = 400;
+  assert.equal(await host.waveformLookup(FACTS), null);
   assert.ok(host.logs.some((l) => l.level === "error" && /waveform/.test(l.message)));
+  plugin.deactivate();
+});
+
+test("a lookup right after activate waits for the saved sign-in", async () => {
+  const plugin = loadPlugin();
+  const host = makeHost({ route: (u) => (u.pathname === "/v1/waveforms/lookup" ? { body: { waveform: "AAEC" } } : undefined) });
+  host.storage.set("session", SIGNED_IN);
+  const activated = plugin.activate(host.api);
+  // Asked before storage has been read back: still answered as signed in.
+  const got = await host.waveformLookup(FACTS);
+  assert.ok(got && got.rms.length === 3);
+  assert.equal(host.requests.filter((r) => /\/v1\/waveforms\/lookup$/.test(r.url)).length, 1);
+  await activated;
   plugin.deactivate();
 });
 
@@ -129,7 +148,7 @@ test("silence isn't shared, and a failed share is only logged", async () => {
   server.status = 500;
   await host.waveformShare(FACTS, [0.1, 0.3]);
   assert.equal(calls().length, 1, "no retry");
-  assert.ok(host.logs.some((l) => l.level === "error" && /share a waveform/.test(l.message)));
+  assert.ok(host.logs.some((l) => l.level === "warn" && /share a waveform/.test(l.message)));
   plugin.deactivate();
 });
 
@@ -177,10 +196,12 @@ const STATS = {
   sampleRates: [{ sampleRate: 44100, copies: 2 }], bitDepths: [{ bitDepth: 16, copies: 2 }],
 };
 
-async function toolSetup(subject) {
+// `noCopies`: the subject is known, but /v1/formats?subject= is a 404.
+async function toolSetup(subject, { noCopies = false } = {}) {
   const plugin = loadPlugin();
   const route = (u) => {
     if (u.pathname === "/v1/subjects/resolve") return subject ? { body: { subject } } : { status: 404, body: { error: "not found" } };
+    if (u.pathname === "/v1/formats" && u.searchParams.get("subject") && noCopies) return { status: 404, body: { error: "not found" } };
     if (u.pathname === "/v1/formats") return { body: u.searchParams.get("subject") ? { ...STATS, subject: { id: subject.id } } : STATS };
     return undefined;
   };
@@ -192,7 +213,7 @@ async function toolSetup(subject) {
 
 test("get_formats: global stats, and a song's by its subject — asked anonymously", async () => {
   const { plugin, host } = await toolSetup({ id: 42, kind: "track", name: "Jóga", waveforms: [] });
-  assert.deepEqual(await host.tools.get_formats({}), STATS);
+  assert.deepEqual(await host.tools.get_formats({}), { found: true, ...STATS });
   const song = await host.tools.get_formats({ kind: "track", title: "Jóga", artistName: "Björk" });
   assert.equal(song.found, true);
   assert.equal(song.copies, 3);
@@ -211,16 +232,24 @@ test("get_formats: unknown subject is found=false; bad input is a readable error
   plugin.deactivate();
 });
 
+test("get_formats: a known song with no copy counted is found=false", async () => {
+  const { plugin, host } = await toolSetup({ id: 42, kind: "track", name: "Jóga", waveforms: [] }, { noCopies: true });
+  assert.deepEqual(await host.tools.get_formats({ kind: "track", title: "Jóga", artistName: "Björk" }), { found: false, copies: 0 });
+  plugin.deactivate();
+});
+
 test("has_waveform lists the shared versions without their peaks", async () => {
   const { plugin, host } = await toolSetup({
     id: 42, kind: "track", name: "Jóga",
-    waveforms: [{ durationSecs: 305, peaks: "AAEC", sharedBy: "alice" }, { durationSecs: 412, peaks: "AAEC", sharedBy: null }],
+    waveforms: [{ durationSecs: 305, peaks: "AAEC" }, { durationSecs: 412, peaks: "AAEC" }],
   });
   const out = await host.tools.has_waveform({ title: "Jóga", artistName: "Björk" });
   assert.deepEqual(out, {
     title: "Jóga", artistName: "Björk", shared: true,
-    waveforms: [{ durationSecs: 305, sharedBy: "alice" }, { durationSecs: 412, sharedBy: null }],
+    waveforms: [{ durationSecs: 305 }, { durationSecs: 412 }],
   });
+  // Who shared one is never part of the answer.
+  assert.ok(!/sharedBy/.test(JSON.stringify(out)));
   plugin.deactivate();
 });
 

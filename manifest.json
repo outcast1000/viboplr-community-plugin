@@ -21,7 +21,8 @@
     "library:write",
     "lyrics:write",
     "plugins:call",
-    "playback:markers"
+    "playback:markers",
+    "ui:read"
   ],
   "permissionReasons": {
     "network:community.viboplr.com": "Browse and import what's shared, publish your own, like and comment, and send plays, likes and waveforms when switched on",
@@ -34,7 +35,8 @@
     "library:write": "Save a mixtape you chose to your playlists, and replace it with its newer version when you update it",
     "lyrics:write": "Make shared synced lyrics you chose to import the song's lyrics",
     "plugins:call": "Get a song's synced lyrics from your lyrics providers to publish them, and again when you undo an import",
-    "playback:markers": "Show timed comments as ticks on the seek bar, when that's switched on"
+    "playback:markers": "Show timed comments as ticks on the seek bar, when that's switched on",
+    "ui:read": "Offer a shared cue sheet only while Now Playing is on your screen, not for every song played in the background"
   },
   "viewHeader": {
     "subtitle": "What Viboplr listeners share: songs, albums and artists, mixtapes, and Subsonic servers"
@@ -65,7 +67,7 @@
         },
         {
           "name": "has_waveform",
-          "description": "Whether Viboplr Community has a shared seek-bar waveform for a song, one per recording length. Returns { title, artistName, shared, waveforms: [{ durationSecs, sharedBy }] }.",
+          "description": "Whether Viboplr Community has a shared seek-bar waveform for a song, and for which recording lengths. Returns { title, artistName, shared, waveforms: [{ durationSecs }] }; who shared one is never said.",
           "readOnly": true,
           "inputSchema": {
             "type": "object",

@@ -4,7 +4,7 @@
 // for a 404.
 
 // `waveforms: false` is an app from before api.waveforms (it never asks).
-function makeHost({ route, current = null, queue = [], appVersion = "1.0.94", waveforms = true } = {}) {
+function makeHost({ route, current = null, queue = [], appVersion = "1.0.94", waveforms = true, uiContext = null } = {}) {
   const host = {
     requests: [],
     opened: [],
@@ -258,6 +258,24 @@ function makeHost({ route, current = null, queue = [], appVersion = "1.0.94", wa
   }
   host.waveformLookup = (facts) => Promise.resolve(host.waveformLookupHandler ? host.waveformLookupHandler(facts) : null);
   host.waveformShare = (facts, rms) => Promise.resolve(host.waveformShareHandler ? host.waveformShareHandler(facts, rms) : undefined);
+
+  // What the user is looking at (api.ui.getContext). `uiContext: false` is an
+  // app from before it. host.setContext(ctx) changes it and tells the plugin.
+  host.context = uiContext || null;
+  host.contextHandler = null;
+  if (uiContext !== false) {
+    host.api.ui.getContext = async () => host.context;
+    host.api.ui.onContextChanged = (handler) => {
+      host.contextHandler = handler;
+      return () => {
+        host.contextHandler = null;
+      };
+    };
+  }
+  host.setContext = (ctx) => {
+    host.context = ctx;
+    return Promise.resolve(host.contextHandler ? host.contextHandler(ctx) : undefined);
+  };
 
   host.current = current;
   host.lastView = () => host.views[host.views.length - 1].data;
