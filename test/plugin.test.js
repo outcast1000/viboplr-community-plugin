@@ -338,10 +338,13 @@ test("a 401 signs the plugin out instead of failing silently", async () => {
 });
 
 test("an unreachable server is a banner in the view, not a toast", async () => {
-  const { host } = await setup(() => {
-    throw new Error("connection refused");
-  });
-  await host.actions["discover-search"]({ query: "bjork" });
+  const { host } = await setup(
+    () => {
+      throw new Error("connection refused");
+    },
+    { session: { token: "vcom_tok", user: { login: "alice" } } }
+  );
+  await host.actions.tab({ tabId: "you" });
   const banners = nodes(host.lastView(), "layout").filter((n) => /ds-banner/.test(n.className || ""));
   assert.equal(banners.length, 1);
   assert.match(banners[0].children[0].content, /connection refused/);
@@ -350,12 +353,13 @@ test("an unreachable server is a banner in the view, not a toast", async () => {
 
 test("a proxy's web page instead of JSON is named as such, and requests identify themselves", async () => {
   // Seen live behind Zscaler: HTTP 200 carrying its "Browser Isolation" page.
-  const { host } = await setup(() => ({ status: 200, body: undefined }));
+  const { host } = await setup(() => ({ status: 200, body: undefined }), { session: { token: "vcom_tok", user: { login: "alice" } } });
   host.api.network.fetch = async (url, init = {}) => {
     host.requests.push({ url, init });
     return { status: 200, headers: {}, text: async () => "<!doctype html><title>Browser Isolation</title>" };
   };
-  await host.actions["discover-search"]({ query: "x" });
+  host.requests.length = 0;
+  await host.actions.tab({ tabId: "you" });
   const banners = nodes(host.lastView(), "layout").filter((n) => /ds-banner/.test(n.className || ""));
   assert.match(banners[0].children[0].content, /proxy or filter on your network/);
   assert.match(host.requests[0].init.headers["User-Agent"], /^Viboplr-Community-Plugin\//);
@@ -381,16 +385,15 @@ test("a cue sheet row says when an imported sheet has an update", async () => {
   assert.equal(plugin._cardRow(cue, { ...ITEM, id: "other" }).badge, undefined);
 });
 
-test("a share link opens Discover and asks to import", async () => {
+test("a share link opens You and asks to import", async () => {
   const { host } = await setup((u) => {
     if (u.pathname === "/v1/items/abc123") return { body: { item: { ...ITEM, payload: SHEET } } };
-    if (u.pathname === "/v1/activity") return { body: { entries: [], hasMore: false } };
   });
   await host.deepLink("viboplr://plugin/community/open?id=abc123");
   for (let i = 0; i < 5; i++) await flush();
   assert.deepEqual(host.navigated, ["community"]);
   const view = host.lastView();
-  assert.equal(nodes(view, "tabs")[0].activeTab, "discover");
+  assert.equal(nodes(view, "tabs")[0].activeTab, "you");
   assert.equal(nodes(view, "confirm")[0].confirmAction, "confirm-import");
 });
 
@@ -413,82 +416,28 @@ const SERVER_ITEM = {
   },
 };
 
-test("the Subsonic servers tab lists servers and Add opens the app's own dialog with the login", async () => {
-  const counted = [];
-  const { host } = await setup(
-    (u, init) => {
-      if (u.pathname === "/v1/items/search" && u.searchParams.get("kind") === "subsonic_server") {
-        // Members only: the server answers a signed-in caller alone.
-        if (init.headers.Authorization !== "Bearer vcom_tok") return { status: 401, body: { error: "sign in to see Subsonic servers" } };
-        return { body: { items: [SERVER_ITEM], hasMore: false } };
-      }
-      if (u.pathname === "/v1/items/srv1/imported") counted.push(1);
-      if (u.pathname === "/v1/me/items") return { body: { items: [] } };
-      return { status: 204 };
-    },
-    { session: { token: "vcom_tok", user: { login: "bob" } } }
-  );
-  await host.actions.tab({ tabId: "subsonic_server" });
-  const list = nodes(host.lastView(), "track-row-list")[0];
-  assert.equal(list.items[0].title, "Jazz box");
-  assert.equal(list.items[0].subtitle, "music.example.com · jazz, flac · @alice · 2 adds");
-  assert.deepEqual(list.items[0].actions, ["add-server", "page"]);
-
-  await host.actions["add-server"]({ itemId: "srv1" });
-  await flush();
-  assert.deepEqual(host.addRequests, [
-    { kind: "subsonic", name: "Jazz box", url: "https://music.example.com", username: "guest", password: "g&t" },
-  ]);
-  assert.equal(counted.length, 1);
-});
-
-test("signed out, the Subsonic servers tab asks you to sign in and fetches nothing", async () => {
-  const { host } = await setup(() => ({ status: 204 }));
-  host.requests.length = 0;
-  await host.actions.tab({ tabId: "subsonic_server" });
-  assert.equal(host.requests.filter((q) => q.url.includes("/v1/items/search")).length, 0, "no request the server would refuse");
-  const view = host.lastView();
-  assert.ok(nodes(view, "text").some((n) => n.content === "Subsonic servers are for signed-in members. Sign in with GitHub to see them."));
-  assert.ok(nodes(view, "button").some((b) => b.action === "sign-in"));
-  assert.equal(nodes(view, "track-row-list").length, 0);
-});
-
-test("signing out takes the Subsonic servers listing off the screen", async () => {
-  const { host } = await setup(
-    (u) => {
-      if (u.pathname === "/v1/items/search") return { body: { items: [SERVER_ITEM], hasMore: false } };
-      if (u.pathname === "/v1/me/items") return { body: { items: [] } };
-      return { status: 204 };
-    },
-    { session: { token: "vcom_tok", user: { login: "bob" } } }
-  );
-  await host.actions.tab({ tabId: "subsonic_server" });
-  assert.equal(nodes(host.lastView(), "track-row-list")[0].items[0].title, "Jazz box");
-  await host.actions["sign-out"]();
-  assert.equal(nodes(host.lastView(), "track-row-list").length, 0);
-  assert.ok(nodes(host.lastView(), "button").some((b) => b.action === "sign-in"));
-});
-
-test("on an app without requestAdd, Add opens the server's page instead", async () => {
-  const { host } = await setup(() => ({ status: 204 }));
-  delete host.api.collections.requestAdd;
-  await host.actions["add-server"]({ itemId: "srv1" });
+test("a share link to something the app can't take in (a Subsonic server) opens its page", async () => {
+  const { host } = await setup((u) => {
+    if (u.pathname === "/v1/items/srv1") return { body: { item: SERVER_ITEM } };
+  });
+  await host.deepLink("viboplr://plugin/community/open?id=srv1");
+  for (let i = 0; i < 5; i++) await flush();
   assert.deepEqual(host.opened, ["https://community.viboplr.com/servers/srv1"]);
-  assert.equal(host.addRequests.length, 0);
+  assert.deepEqual(host.navigated, []);
+  assert.equal(host.addRequests.length, 0, "the website's Add opens the app's dialog itself");
 });
 
-test("tabs are Discover, one per non-music module, and You, which has a section per module", async () => {
+test("tabs are You and Settings, and You has a section per module", async () => {
   const { host } = await setup(
     (u) => {
       if (u.pathname === "/v1/me/items") {
         return { body: { items: [{ ...ITEM, kind: "cue_sheet" }, SERVER_ITEM] } };
       }
-      if (u.pathname === "/v1/items/search") return { body: { items: [], hasMore: false } };
     },
     { session: { token: "vcom_tok", user: { login: "alice" } } }
   );
   await host.addSheet("Jóga", "Björk", SHEET);
-  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["discover", "mixtape", "subsonic_server", "you", "settings"]);
+  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["you", "settings"]);
 
   await host.actions.tab({ tabId: "you" });
   const sections = nodes(host.lastView(), "section");
@@ -505,7 +454,7 @@ test("tabs are Discover, one per non-music module, and You, which has a section 
   assert.equal(host.opened.at(-1), "https://community.viboplr.com/servers/new");
 });
 
-test("a module the plugin has never heard of still gets a working tab and Mine section", async () => {
+test("a module the plugin has never heard of still gets a working section on You", async () => {
   const PRESET = {
     id: "eq1",
     kind: "eq_preset",
@@ -531,28 +480,23 @@ test("a module the plugin has never heard of still gets a working tab and Mine s
           },
         };
       }
-      if (u.pathname === "/v1/items/search" && u.searchParams.get("kind") === "eq_preset") return { body: { items: [PRESET], hasMore: false } };
       if (u.pathname === "/v1/me/items") return { body: { items: [PRESET] } };
-      if (u.pathname === "/v1/items/search") return { body: { items: [], hasMore: false } };
     },
     { session: { token: "vcom_tok", user: { login: "bob" } } }
   );
   await plugin._loadModules();
-  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.label), ["Discover", "Mixtapes", "Subsonic servers", "EQ presets", "You", "Settings"]);
+  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.label), ["You", "Settings"]);
   assert.ok(host.storage.get("modules").some((m) => m.kind === "eq_preset"), "remembered for the next start");
 
-  await host.actions.tab({ tabId: "eq_preset" });
-  const view = host.lastView();
-  assert.ok(nodes(view, "text").some((n) => n.content === "Shared EQ presets."), "the module's notice");
-  const row = nodes(view, "track-row-list")[0];
-  assert.deepEqual(row.actions, [{ id: "page", label: "Open page", icon: "↗" }]);
-  assert.deepEqual(row.items[0], { id: "eq1", title: "HD 600", subtitle: "10 bands · @bob · 1 use", actions: ["page"] });
+  await host.actions.tab({ tabId: "you" });
+  const sections = nodes(host.lastView(), "section");
+  const titles = sections.map((n) => n.title);
+  assert.deepEqual(titles, ["Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your Subsonic servers", "Your eq presets"]); // eq: no `plural`, so the lowercased name
+  const list = nodes({ children: sections.at(-1).children }, "track-row-list")[0];
+  assert.deepEqual(list.actions, [{ id: "page", label: "Open page", icon: "↗" }]);
+  assert.deepEqual(list.items[0], { id: "eq1", title: "HD 600", subtitle: "10 bands · @bob · 1 use", actions: ["page"] });
   await host.actions.page({ itemId: "eq1" });
   assert.equal(host.opened.at(-1), "https://community.viboplr.com/eq-presets/eq1");
-
-  await host.actions.tab({ tabId: "you" });
-  const titles = nodes(host.lastView(), "section").map((n) => n.title);
-  assert.deepEqual(titles, ["Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your Subsonic servers", "Your eq presets"]); // eq: no `plural`, so the lowercased name
 });
 
 // The built-in module descriptions as the server would send them.
@@ -565,7 +509,8 @@ test("a bad module list from the server is ignored, not fatal", async () => {
     if (u.pathname === "/v1/modules") return { body: { modules: [{ kind: 3 }, null, { name: "no kind" }] } };
   });
   await plugin._loadModules();
-  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["discover", "mixtape", "subsonic_server", "you", "settings"]);
+  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["you", "settings"]);
+  assert.deepEqual(plugin._state().modules.map((m) => m.kind), plugin._builtinModules.map((m) => m.kind), "the built-in list stays");
 });
 
 // ---- mixtapes ---------------------------------------------------------------
@@ -592,7 +537,6 @@ function mixRoute(posted, at = { version: 1 }) {
   return (u, init) => {
     const mix = { ...MIX, version: at.version };
     if (u.pathname === "/v1/items/mx1") return { body: { item: { ...mix, payload: { description: "Slow ones.", tracks: MIX_TRACKS } } } };
-    if (u.pathname === "/v1/items/search") return { body: { items: u.searchParams.get("kind") === "mixtape" ? [mix] : [], hasMore: false } };
     const published = (body, i) => ({ ...MIX, id: "mine" + i, title: body.title, publisher: { login: "alice" }, url: "https://community.viboplr.com/mixtapes/mine" + i });
     if (u.pathname === "/v1/me/items") return { body: { items: posted.map(published) } };
     if (u.pathname === "/v1/items" && init.method === "POST") {
@@ -663,48 +607,26 @@ test("publishing needs a sign-in, and the queue publishes under the name you giv
   assert.deepEqual(posted[0].tracks, [{ title: "Naima", artistName: "John Coltrane", albumName: null, durationSecs: 261 }]);
 });
 
-test("Play plays the mixtape as metadata-only entries with a playlist banner", async () => {
-  const { host } = await setup(mixRoute([]));
-  await host.actions["play-mixtape"]({ itemId: "mx1" });
-  assert.equal(host.plays.length, 1);
-  const play = host.plays[0];
-  assert.equal(play.startIndex, 0);
-  assert.deepEqual(play.context, { name: "Late night", source: "playlist", description: "Slow ones." });
-  assert.deepEqual(play.tracks[0], { title: "So What", artist_name: "Miles Davis", album_title: "Kind of Blue", duration_secs: 562 });
-  await flush();
-  assert.ok(host.requests.some((r) => r.url.endsWith("/v1/items/mx1/imported")), "a play counts");
-});
-
 test("Save remembers where the mixtape came from, and a newer version replaces the saved copy", async () => {
   const at = { version: 1 };
   const { host } = await setup(mixRoute([], at));
-  await host.actions.tab({ tabId: "mixtape" });
-  let row = nodes(host.lastView(), "track-row-list")[0].items[0];
-  assert.deepEqual(row.actions, ["play-mixtape", "save-mixtape", "page"]);
-  assert.equal(row.artistName, "Miles Davis", "art from the main artist");
+  const save = () => host.actions["confirm-save-mixtape"]({ id: "mx1" });
 
-  await host.actions["save-mixtape"]({ itemId: "mx1" });
+  await save();
   const [saved] = host.playlists.values();
   assert.equal(saved.name, "Late night");
   assert.equal(saved.description, "Slow ones.");
   assert.deepEqual(saved.metadata, { communityId: "mx1", communityVersion: 1, communityBy: "bob" });
   assert.equal(saved.tracks.length, 2);
   assert.equal(saved.source, undefined, "plays as an ordinary playlist");
-  row = nodes(host.lastView(), "track-row-list")[0].items[0];
-  assert.equal(row.badge.label, "Saved");
 
-  await host.actions["save-mixtape"]({ itemId: "mx1" });
+  await save();
   assert.equal(host.playlists.size, 1);
   assert.match(host.lastNotice().message, /already in your Playlists/);
 
-  // bob republishes: coming back to the tab refetches, the row offers an
-  // update, and the update swaps the saved copy.
+  // bob republishes: saving again swaps the saved copy for the new version.
   at.version = 2;
-  await host.actions.tab({ tabId: "you" });
-  await host.actions.tab({ tabId: "mixtape" });
-  row = nodes(host.lastView(), "track-row-list")[0].items[0];
-  assert.equal(row.badge.label, "Update");
-  await host.actions["update-mixtape"]({ itemId: "mx1" });
+  await save();
   const copies = [...host.playlists.values()];
   assert.equal(copies.length, 1);
   assert.equal(copies[0].metadata.communityVersion, 2);
@@ -742,13 +664,13 @@ test("a saved community mixtape isn't yours to publish", async () => {
   assert.match(host.lastNotice().message, /isn't yours to publish/);
 });
 
-test("a mixtape share link opens the Mixtapes tab and asks to save", async () => {
+test("a mixtape share link opens You and asks to save", async () => {
   const { host } = await setup(mixRoute([]));
   await host.deepLink("viboplr://plugin/community/open?id=mx1");
   for (let i = 0; i < 10; i++) await flush();
   assert.deepEqual(host.navigated, ["community"]);
   const view = host.lastView();
-  assert.equal(nodes(view, "tabs")[0].activeTab, "mixtape");
+  assert.equal(nodes(view, "tabs")[0].activeTab, "you");
   const confirm = nodes(view, "confirm")[0];
   assert.equal(confirm.confirmAction, "confirm-save-mixtape");
   assert.match(confirm.message, /@bob's mixtape “Late night” \(2 tracks\)/);
@@ -777,7 +699,6 @@ function lyricsRoute(posted, at = { version: 1 }) {
   return (u, init) => {
     const item = { ...LYRICS_ITEM, version: at.version };
     if (u.pathname === "/v1/items/ly1") return { body: { item: { ...item, payload: { lrc: LRC.replace("Three", "Three v" + at.version) } } } };
-    if (u.pathname === "/v1/items/search") return { body: { items: u.searchParams.get("kind") === "synced_lyrics" ? [item] : [], hasMore: false } };
     if (u.pathname === "/v1/me/items") return { body: { items: [] } };
     if (u.pathname === "/v1/items" && init.method === "POST") {
       const body = JSON.parse(init.body);

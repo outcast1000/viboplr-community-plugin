@@ -1,5 +1,4 @@
-// Plugin 1.0: Discover, the Community tab on Viboplr's own pages, and the
-// seek-bar ticks.
+// The Community tab on Viboplr's own pages, and the seek-bar ticks.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { loadPlugin } = require("./harness/sandbox");
@@ -62,18 +61,6 @@ function route(log = []) {
     if (p === "/v1/subjects/2/children") return { body: { tracks: [JOGA], albums: [] } };
     if (p === "/v1/subjects/7") return { body: { subject: JOGA } };
     if (p === "/v1/items" && u.searchParams.get("kind") === "cue_sheet") return { body: { items: [SHEET_ITEM] } };
-    if (p === "/v1/subjects/search") return { body: { subjects: [BJORK, JOGA], hasMore: false } };
-    if (p === "/v1/activity") {
-      return {
-        body: {
-          entries: [
-            { type: "comment", event: "commented", at: 0, comment: COMMENT, subject: JOGA },
-            { type: "item", event: "published", at: 0, item: { id: "mx1", kind: "mixtape", title: "Late night", version: 1, publisher: { login: "bob" }, url: "u" }, subject: null },
-          ],
-          hasMore: false,
-        },
-      };
-    }
     return undefined;
   };
 }
@@ -92,33 +79,28 @@ async function setup(opts = {}) {
 const tab = (host, kind, entity) => host.infoProviders["community_" + kind]({ id: 0, ...entity });
 const joga = { kind: "track", name: "Jóga", artistName: "Björk" };
 
-test("Discover searches songs, albums and artists and opens them on their Community tab", async () => {
+test("a song row on an artist's tab opens the song's page on its Community tab", async () => {
   const { host } = await setup();
-  await host.actions["discover-search"]({ query: "bjork" });
-  const view = host.lastView();
-  assert.deepEqual(nodes(view, "tabs")[0].tabs.map((t) => t.label), ["Discover", "Mixtapes", "Subsonic servers", "You", "Settings"]);
-  const sections = nodes(view, "section").map((s) => s.title);
-  assert.deepEqual(sections.slice(0, 2), ["Artists", "Songs"]);
-  const song = nodes(view, "track-row-list")[1].items[0];
+  const tree = (await tab(host, "artist", { kind: "artist", name: "Björk" })).value;
+  const song = nodes(tree, "track-row-list").flatMap((l) => l.items).find((i) => i.title === "Jóga");
   assert.equal(song.subtitle, "Song · Björk · 1 cue sheet · 1 comment · ♥ 3");
   await host.actions["open-subject"]({ itemId: song.id });
   assert.deepEqual(host.entityOpens.at(-1), ["track", { name: "Jóga", artistName: "Björk" }, { tab: "community_track" }]);
   // An older app without navigateToEntity: the page opens, without the tab.
   delete host.api.ui.navigateToEntity;
-  await host.actions["open-subject"]({ itemId: "subject:2" });
-  assert.deepEqual(host.requestedActions.at(-1), ["navigate-to-artist", { name: "Björk" }]);
+  await host.actions["open-subject"]({ itemId: song.id });
+  assert.deepEqual(host.requestedActions.at(-1), ["navigate-to-track", { name: "Jóga", artistName: "Björk" }]);
 });
 
-test("the feed says who did what, and each entry opens where it belongs", async () => {
-  const { host, plugin } = await setup();
-  await plugin._state();
-  await host.actions.tab({ tabId: "discover" });
+test("the view is You and Settings: browsing is the website's", async () => {
+  const { host, log } = await setup({ session: SIGNED_IN });
   await flush();
-  const feed = nodes(host.lastView(), "track-row-list").at(-1).items;
-  assert.equal(feed[0].title, "Jóga · Björk");
-  assert.match(feed[0].subtitle, /^@bob commented: “that bridge” · /);
-  await host.actions["open-entry"]({ itemId: feed[0].id });
-  assert.deepEqual(host.entityOpens.at(-1)[0], "track");
+  const view = host.lastView();
+  assert.deepEqual(nodes(view, "tabs")[0].tabs.map((t) => t.label), ["You", "Settings"]);
+  assert.ok(nodes(view, "button").some((b) => b.label === "Browse Community" && b.action === "open-site"));
+  await host.actions["open-site"]();
+  assert.equal(host.opened.at(-1), "https://community.viboplr.com");
+  assert.ok(!log.some(([, p]) => p.startsWith("/v1/activity") || p.startsWith("/v1/subjects/search") || p.startsWith("/v1/items/search")), "nothing is browsed from here");
 });
 
 test("the song's Community tab: like, the cue sheets to import, and comments", async () => {
@@ -180,9 +162,6 @@ test("rows show the picture Community matched, and only one Community serves", a
   assert.equal(plugin._subjectRow({ ...JOGA, art: null }).imageUrl, undefined, "none matched: the host's own art for the names");
   assert.equal(plugin._subjectRow(JOGA).imageUrl, undefined, "an older server sends no art");
   assert.equal(plugin._subjectRow({ ...JOGA, art: { small: "https://evil.example/x.jpg" } }).imageUrl, undefined);
-  const entry = { type: "comment", subject: { ...JOGA, art }, comment: COMMENT, at: 0 };
-  assert.equal(plugin._feedRow(entry, 0).imageUrl, art.small);
-  assert.equal(plugin._feedRow({ type: "item", event: "shared", item: SHEET_ITEM, at: 0 }, 1).imageUrl, undefined);
 });
 
 test("likes made in the app reach Community by default, as likes and un-likes, until switched off", async () => {
@@ -590,40 +569,4 @@ test("the comment box empties after a post, and keeps the text when the post fai
   const redraws = host.sectionData.length;
   await host.actions["tab-comment"]({ entity: joga, query: "second" });
   assert.equal(host.sectionData.length, redraws, "a failed post doesn't redraw the box away");
-});
-
-test("only the latest Discover search shows, whichever answers last", async () => {
-  const held = {};
-  const base = route();
-  const { host } = await setup({
-    route: async (u, init) => {
-      if (u.pathname === "/v1/subjects/search") {
-        const q = u.searchParams.get("q");
-        await new Promise((r) => (held[q] = r));
-        return { body: { subjects: q === "bjork" ? [BJORK] : [JOGA], hasMore: false } };
-      }
-      return base(u, init);
-    },
-  });
-  const first = host.actions["discover-search"]({ query: "bjork" });
-  await flush();
-  const second = host.actions["discover-search"]({ query: "joga" });
-  await flush();
-  held.joga();
-  await second;
-  held.bjork();
-  await first;
-  await flush();
-  const lists = nodes(host.lastView(), "track-row-list");
-  const titles = lists.flatMap((l) => l.items.map((i) => i.title));
-  assert.ok(titles.some((t) => /Jóga/.test(t)), "the latest query's results: " + titles);
-  assert.ok(!titles.some((t) => t === "Björk"), "not the earlier one's: " + titles);
-});
-
-test("servers from before `area` still get the right tabs", () => {
-  const p = loadPlugin();
-  assert.equal(p._areaOf({ kind: "cue_sheet" }), "music");
-  assert.equal(p._areaOf({ kind: "mixtape" }), "mixtapes");
-  assert.equal(p._areaOf({ kind: "subsonic_server", membersOnly: true }), "servers");
-  assert.equal(p._areaOf({ kind: "eq_preset", area: "presets" }), "presets");
 });
