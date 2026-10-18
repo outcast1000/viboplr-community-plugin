@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.7.1
+- **One heart: Viboplr's own.** The Community tab's ♡ Like button is gone; the tab shows the count instead ("♥ 12 on Community · you like it"). A song, album or artist is liked with Viboplr's heart, and with *Send my likes to Community* on (Extensions → Viboplr Community) the like reaches Community too. The website no longer likes songs, albums or artists either, so Community and Viboplr can't disagree about what you like. Comments are still liked on the Community tab, and cue sheets, mixtapes and comments on the website.
+
 ## v1.7.0
 - **No more Community view in the sidebar: browsing, and what you shared, are on the website.** Community's website shows everything shared, and your page there shows everything you added — likes, comments, plays, waveforms and a history of it all — where you can edit or unpublish it. What only the app can do stays: the Community tab on every song, album and artist page, publishing from this computer, and what runs while you listen.
 - **Sign-in and the switches moved to Extensions → Viboplr Community** (its Configuration section): your account, *While you listen*, *Send from Viboplr* and *Share with Viboplr Community*, unchanged.

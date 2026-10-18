@@ -56,7 +56,7 @@ function route(log = []) {
       return { body: { accepted: n, skipped: 0 } };
     }
     if (p === "/v1/likes") return { body: { subject: { id: 7, kind: "track", url: "u" }, likes: 4, liked: init.method === "PUT" } };
-    if (p === "/v1/subjects/7/like") return { body: { likes: init.method === "PUT" ? 4 : 3, liked: init.method === "PUT" } };
+    if (p === "/v1/comments/11/like") return { body: { likes: init.method === "PUT" ? 3 : 2, liked: init.method === "PUT" } };
     if (p === "/v1/subjects/2/comments") return { body: { comments: [], hasMore: false } };
     if (p === "/v1/subjects/2/children") return { body: { tracks: [JOGA], albums: [] } };
     if (p === "/v1/subjects/7") return { body: { subject: JOGA } };
@@ -113,13 +113,14 @@ test("no view of its own: a settings panel, and what you shared is on the websit
   assert.equal(host.actions["publish-queue"], undefined, "only saved playlists are published");
 });
 
-test("the song's Community tab: like, the cue sheets to import, and comments", async () => {
+test("the song's Community tab: its likes, the cue sheets to import, and comments", async () => {
   const { host } = await setup({ session: SIGNED_IN });
   const out = await tab(host, "track", joga);
   assert.equal(out.status, "ok");
   const tree = out.value;
-  const like = nodes(tree, "button").find((b) => b.action === "tab-like");
-  assert.equal(like.label, "♡ Like · 3");
+  // Read-only: the song is liked with the app's own heart (Send my likes).
+  assert.ok(nodes(tree, "text").some((t) => t.content === "♥ 3 on Community"));
+  assert.equal(host.actions["tab-like"], undefined, "no second heart");
   const sections = nodes(tree, "section").map((s) => s.title);
   assert.deepEqual(sections, ["Cue sheets · 1", "Comments · 1"]);
   const sheetRow = nodes(nodes(tree, "section")[0], "track-row-list")[0].items[0];
@@ -129,11 +130,10 @@ test("the song's Community tab: like, the cue sheets to import, and comments", a
   assert.match(comment.subtitle, /^@bob · at 2:41 · .* · ♥ 2$/);
   assert.deepEqual(comment.actions, ["tab-comment-like", "tab-comment-report"]);
 
-  // Like: one PUT, then the tab is redrawn in place.
-  await host.actions["tab-like"]({ entity: joga });
+  // A like made with the app's heart reaches Community, and the open tab follows.
+  await host.likeChanged({ kind: "track", name: "Jóga", artistName: "Björk", albumTitle: null, albumArtistName: null, liked: 1, previous: 0 });
   const redraw = host.sectionData.at(-1);
   assert.equal(redraw.typeId, "community_track");
-  assert.equal(nodes(redraw.data, "button").find((b) => b.action === "tab-like").label, "♥ Liked · 4");
 });
 
 test("a comment can be pinned to where the song is now", async () => {
@@ -153,7 +153,8 @@ test("a comment can be pinned to where the song is now", async () => {
 test("signed out, the tab invites a sign-in instead of a composer", async () => {
   const { host } = await setup();
   const tree = (await tab(host, "track", joga)).value;
-  assert.equal(nodes(tree, "button").find((b) => b.action === "tab-sign-in").label, "♡ Like · 3");
+  assert.ok(nodes(tree, "button").some((b) => b.action === "tab-sign-in"));
+  assert.ok(nodes(tree, "text").some((t) => t.content === "♥ 3 on Community"), "the count shows signed out too");
   assert.equal(nodes(tree, "search-input").length, 0);
 });
 
@@ -438,9 +439,9 @@ test("the header line leads with the likes", async () => {
 // for a tab this plugin never loaded.
 test("a tab the host drew from its cache still acts: its buttons load what they need", async () => {
   const { host, log } = await setup({ session: SIGNED_IN });
-  await host.actions["tab-like"]({ entity: joga });
-  assert.ok(log.some(([m, p]) => m === "PUT" && p === "/v1/subjects/7/like"), "liked");
-  assert.equal(nodes(host.sectionData.at(-1).data, "button").find((b) => b.action === "tab-like").label, "♥ Liked · 4");
+  await host.actions["tab-comment-like"]({ entity: joga, itemId: "comment:11" });
+  assert.ok(log.some(([m, p]) => m === "PUT" && p === "/v1/comments/11/like"), "liked the comment");
+  assert.ok(host.sectionData.length > 0, "redrawn");
 
   const fresh = await setup({ session: SIGNED_IN });
   await fresh.host.actions["tab-comment"]({ entity: joga, query: "hello" });

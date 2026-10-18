@@ -1792,11 +1792,13 @@ function loadTabData(entity) {
   });
 }
 
-function likeButton(subject) {
+// The likes, read-only: a song, album or artist is liked with Viboplr's own
+// heart, which reaches Community through "Send my likes". A second heart here
+// would like it on Community only, and the two would drift apart.
+function likeCount(subject) {
   if (!subject) return null;
-  var n = subject.likes || 0;
-  if (!state.token) return { type: "button", label: "♡ Like · " + n, action: "tab-sign-in", variant: "secondary" };
-  return { type: "button", label: (subject.liked ? "♥ Liked · " : "♡ Like · ") + n, action: "tab-like", variant: subject.liked ? "accent" : "secondary" };
+  var text = "♥ " + (subject.likes || 0) + " on Community" + (subject.liked ? " · you like it" : "");
+  return { type: "text", className: "ds-muted", content: text };
 }
 
 function commentRows(data) {
@@ -1907,7 +1909,7 @@ function tabTree(data) {
   var s = data.subject;
   var noun = e.kind === "track" ? "song" : e.kind;
   var top = [];
-  var like = likeButton(s);
+  var like = likeCount(s);
   if (like) top.push(like);
   if (s) top.push({ type: "button", label: "Open the " + noun + "'s page", action: "tab-page", variant: "secondary" });
   if (e.kind === "track" && state.token) {
@@ -2023,22 +2025,6 @@ var TAB_ACTIONS = {
   "tab-page": function (p) {
     return withTab(p, function (t) {
       return api.network.openUrl(t.subject ? t.subject.url : SERVER);
-    });
-  },
-  "tab-like": function (p) {
-    if (!requireSignIn("like")) return Promise.resolve();
-    return withTab(p, function (t) {
-      if (!t.subject) return;
-      var on = !t.subject.liked;
-      return request(on ? "PUT" : "DELETE", "/v1/subjects/" + encodeURIComponent(t.subject.id) + "/like", undefined, true)
-        .then(function (d) {
-          t.subject = Object.assign({}, t.subject, { likes: d.likes, liked: d.liked });
-          forgetSubject(t.entity.kind, t.entity.name, t.entity.artistName);
-          return refreshTab(t.entity, false);
-        })
-        .catch(function (e) {
-          fail("Couldn't like that", e);
-        });
     });
   },
   "tab-comment": function (p) {
