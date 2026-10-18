@@ -165,7 +165,6 @@ test("the base64 codec round-trips every length", () => {
 
 test("Settings has the Share waveforms switch, on by default, and it sticks", async () => {
   const { plugin, host, calls } = await setup({ session: SIGNED_IN, waveform: "AAEC" });
-  await host.actions.tab({ tabId: "settings" });
   const section = nodes(host.lastView(), "section").find((s) => s.title === "Share with Viboplr Community");
   assert.ok(section);
   const toggle = () => nodes(host.lastView(), "toggle").find((t) => t.action === "toggle-share-waveforms");
@@ -181,7 +180,6 @@ test("Settings has the Share waveforms switch, on by default, and it sticks", as
 test("an app without api.waveforms: activates fine and says the switch needs a newer Viboplr", async () => {
   const { plugin, host } = await setup({ session: SIGNED_IN, waveforms: false });
   assert.equal(host.api.waveforms, undefined);
-  await host.actions.tab({ tabId: "settings" });
   assert.match(JSON.stringify(host.lastView()), /Sharing waveforms needs a newer Viboplr/);
   assert.equal(await host.waveformLookup(FACTS), null);
   plugin.deactivate();

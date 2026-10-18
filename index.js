@@ -2,16 +2,17 @@
 // share with each other (cue sheets, servers, and whatever comes next).
 //
 // Design notes:
-//  - BROWSING IS THE WEBSITE'S. community.viboplr.com shows everything shared
-//    and, on You, everything a member added; this view doesn't repeat it. The
-//    plugin keeps what only the app can do: publish what's on this computer,
-//    take a shared item into the app (a share link's "Open in Vibo"), the
-//    Community tab on Viboplr's own pages, and what runs while you listen.
-//  - MODULES COME FROM THE SERVER. GET /v1/modules lists what can be shared,
-//    and every item carries a `card` (title, facts, in-Viboplr action), so a
-//    new module gets a section on You here with no plugin release.
-//    INTEGRATIONS adds what only app code can do for a known module (publish
-//    and import cue sheets, lyrics and mixtapes). See "Modules" below.
+//  - BROWSING IS THE WEBSITE'S, AND SO IS "WHAT I SHARED". community.viboplr.com
+//    shows everything shared and, on a member's page, everything they added
+//    (with Edit and Unpublish). The plugin has no view of its own: it keeps
+//    what only the app can do — publish what's on this computer (right-click,
+//    or a song's Community tab), take a shared item into the app (a share
+//    link's "Open in Vibo", answered with a notice), the Community tab on
+//    Viboplr's own pages, and what runs while you listen. Its switches and
+//    the sign-in are its settings panel (Extensions → Viboplr Community).
+//  - MODULES COME FROM THE SERVER. GET /v1/modules lists what can be shared and
+//    names it (the header line's nouns). INTEGRATIONS adds what only app code
+//    can do for a known module (import cue sheets and lyrics). See "Modules".
 //  - THE SERVER OWNS ACCOUNTS, THE APP OWNS WHAT IT HOLDS. Sign-in happens in
 //    the browser (GitHub, through community.viboplr.com); the plugin only ever
 //    holds the server's own revocable `vcom_` token. Cue sheets are written
@@ -28,24 +29,23 @@
 //    in isolation, or a system where viboplr:// isn't registered.
 //  - PROVENANCE LIVES HERE. A sheet file has no "came from the community"
 //    field, so the mapping song → community item (+ the local updatedAt at
-//    import) is kept in this plugin's storage. That is what lets You tell an
-//    untouched import (not ours to republish) from one the user has changed.
-//  - A MIXTAPE IS A TRACK LIST. Publishing sends title/artist/album/length
-//    only — never a track's source (a file path names the publisher's home
-//    folder; a plugin URI plays only where that plugin is installed). Played
-//    or saved here, every entry is metadata-only and the host's resolvers find
-//    a copy. A saved mixtape remembers where it came from in its playlist
-//    `metadata` ({ communityId, communityVersion }), so You can tell it apart
-//    from the user's own and the tab can offer an update.
+//    import) is kept in this plugin's storage. That is what tells an untouched
+//    import (not ours to republish) from one the user has changed.
+//  - A MIXTAPE IS A SAVED PLAYLIST'S TRACK LIST. Only a playlist the user saved
+//    is published (not the queue, not the app's own Liked / Disliked / mixes,
+//    not one saved from the community), and only title/artist/album/length —
+//    never a track's source (a file path names the publisher's home folder; a
+//    plugin URI plays only where that plugin is installed). Saved here, every
+//    entry is metadata-only and the host's resolvers find a copy. A saved
+//    mixtape remembers where it came from in its playlist `metadata`
+//    ({ communityId, communityVersion }), so it is told apart from the user's
+//    own and a newer version replaces it.
 //  - AN IMPORT IS A ONE-OFF WRITE. Shared synced lyrics become the song's
 //    lyrics through api.lyrics.save, like an edit in the app; the plugin is not
 //    a lyrics provider and looks nothing up while anyone listens.
-//  - NOT READY IS A BANNER. A server that can't be reached is shown inside the
-//    view with a Retry, never as a toast (plugin view design guidelines).
 //  - MUSIC LIVES ON VIBOPLR'S OWN PAGES. Cue sheets, synced lyrics, likes
 //    and comments about a song, album or artist are a "Community" tab on
-//    that page (a `plugin_view` information type), not tabs of this view. The
-//    view is You (publishing from this computer) · Settings.
+//    that page (a `plugin_view` information type).
 //  - NOTHING IS ASKED WHILE MUSIC PLAYS unless the user switched it on: the
 //    Now Playing item and the seek-bar ticks (timed comments) both name every
 //    song played to the server, so both start off.
@@ -60,7 +60,8 @@
 // Constants
 // ---------------------------------------------------------------------------
 var SERVER = "https://community.viboplr.com";
-var VIEW = "community";
+// The settings panel (manifest `settingsPanel`): Extensions → Viboplr Community.
+var PANEL = "community-settings";
 var TIMEOUT_MS = 15000;
 // A waveform lookup sits in front of the app computing one, and the app gives
 // up on it after about three seconds: answer (or fail) before that.
@@ -77,11 +78,6 @@ var LINK_PREFIX = "viboplr://plugin/community/";
 var USER_AGENT = "Viboplr-Community-Plugin/1.0(+https://github.com/outcast1000/viboplr-community-plugin)";
 var MAX_AUTHOR_CHARS = 64;
 var FIRST_LOAD_DELAY_MS = 3000;
-var MINE = "you";
-var SETTINGS = "settings";
-// The first Viboplr that opens a plugin's own Extensions page on
-// requestAction("open-extension-settings"); older ones ignore the action.
-var EXTENSION_SETTINGS_MIN_APP = "1.0.103";
 // The Community tab on each kind of page (information type ids: one per
 // entity kind, since a plugin's type ids are unique).
 var TAB_TYPES = { track: "community_track", album: "community_album", artist: "community_artist" };
@@ -100,8 +96,6 @@ function freshState() {
     auth: null,
     // What can be shared (GET /v1/modules); BUILTIN_MODULES until it answers.
     modules: BUILTIN_MODULES.slice(),
-    // The tab: "you" or "settings".
-    tab: MINE,
     // Subjects as the server last described them: by id (for opening one) and
     // a one-minute cache of lookups by name (resolveSubject). The header line,
     // the mini player item and the ticks share its anonymous entries; the tab
@@ -140,17 +134,13 @@ function freshState() {
     playQueue: [],
     // Comments posted from a tab this session: the comment box's stateKey.
     commentsPosted: 0,
-    // Per module: the items this user shared (GET /v1/me/items).
-    shared: {},
-    loading: false,
-    error: null,
     // --- cue sheets ---
-    // api.cues.list() rows.
-    local: null,
     // songKey → { id, version, updatedAt } for sheets imported from the community.
     imports: {},
-    // A pending in-view question: { kind: "import" | "replace", id, title, artist, by }.
-    confirm: null,
+    // What the latest notices ask, answered by their buttons (askInNotice):
+    // `open` a share link's "Import this?" / "Save this?", `replace` "Replace
+    // yours?". Each { kind, id, title, artist, by, ... } (see confirmMessage).
+    pending: { open: null, replace: null },
     lastPublishedUrl: null,
     // --- mixtapes ---
     // api.playlists.list() rows; null until read.
@@ -233,10 +223,9 @@ function errorText(e) {
 // Modules
 // ---------------------------------------------------------------------------
 //
-// Generic: every module gets a section on You (what you shared, rows from each
-// item's card, with Open page / Edit, and "Share" when the module has a website
-// form). INTEGRATIONS, keyed by kind, adds what only app code can do. A module
-// with no integration still works — it just can't do more than the website.
+// What the server says can be shared. Here it only names things (the header
+// line's "2 cue sheets"); a song's Community tab lists the items of the
+// modules it knows, and INTEGRATIONS, keyed by kind, adds their import rows.
 
 // Until the server answers (or when it can't be reached on a first start).
 var BUILTIN_MODULES = [
@@ -303,11 +292,11 @@ function pluralOf(m) {
 }
 
 // Only modules whose description is usable; anything else is ignored rather
-// than breaking the view.
+// than breaking the counts.
 function validModules(list) {
   if (!Array.isArray(list)) return [];
   return list.filter(function (m) {
-    return m && typeof m.kind === "string" && typeof m.name === "string" && typeof m.url === "string" && m.kind !== MINE && m.kind !== SETTINGS;
+    return m && typeof m.kind === "string" && typeof m.name === "string" && typeof m.url === "string";
   });
 }
 
@@ -333,22 +322,6 @@ function uses(m, n) {
 // label becomes the button's tooltip. An action without one keeps its label.
 var ACTION_ICONS = {
   page: "↗",
-  edit: "✎",
-  import: "⬇",
-  update: "↻",
-  publish: "⇪",
-  republish: "↻",
-  unpublish: "✕",
-  "sheet-page": "↗",
-  "publish-playlist": "⇪",
-  "republish-playlist": "↻",
-  "unpublish-mixtape": "✕",
-  "mixtape-page": "↗",
-  "import-lyrics": "⬇",
-  "update-lyrics": "↻",
-  "remove-lyrics": "✕",
-  "unpublish-lyrics": "✕",
-  "lyrics-page": "↗",
 };
 
 function withIcons(actions) {
@@ -372,18 +345,12 @@ function cardRow(m, item) {
 // Integrations: what app code does for a known module
 // ---------------------------------------------------------------------------
 //
-//   actions    extra row actions [{ id, label }] for its rows in a song's
-//              Community tab (handlers live in ACTIONS)
-//   row        (item, row) → row: badges, which actions this row shows
-//   mine       { title, nodes(), load() } — the module's section on You, in
-//              place of the generic "what you shared" list
+//   row        (item, row) → row: badges, and which actions this row shows in
+//              a song's Community tab ("import" / "update" / "page"; tabItems
+//              maps them onto the tab's own actions)
 
 var INTEGRATIONS = {
   cue_sheet: {
-    actions: [
-      { id: "import", label: "Import" },
-      { id: "update", label: "Update" },
-    ],
     row: function (item, row) {
       row.artistName = item.artistName || null;
       row.albumTitle = item.albumName || null;
@@ -401,23 +368,8 @@ var INTEGRATIONS = {
       }
       return row;
     },
-    mine: {
-      title: "Cue sheets on this computer",
-      load: function () {
-        return api.cues.list().then(function (rows) {
-          state.local = rows;
-        });
-      },
-      nodes: function () {
-        return mySheetNodes();
-      },
-    },
   },
   synced_lyrics: {
-    actions: [
-      { id: "import-lyrics", label: "Import" },
-      { id: "update-lyrics", label: "Update" },
-    ],
     row: function (item, row) {
       row.artistName = item.artistName || null;
       row.albumTitle = item.albumName || null;
@@ -434,23 +386,6 @@ var INTEGRATIONS = {
         row.actions = ["import-lyrics", "page"];
       }
       return row;
-    },
-    mine: {
-      title: "Synced lyrics",
-      nodes: function () {
-        return myLyricsNodes();
-      },
-    },
-  },
-  mixtape: {
-    mine: {
-      title: "Your playlists",
-      load: function () {
-        return loadPlaylists();
-      },
-      nodes: function () {
-        return myPlaylistNodes();
-      },
     },
   },
 };
@@ -544,14 +479,9 @@ function saveSession() {
   return api.storage.set("session", state.token ? { token: state.token, user: state.user } : null);
 }
 
-function clearShared() {
-  state.shared = {};
-}
-
 function sessionLost() {
   state.token = null;
   state.user = null;
-  clearShared();
   saveSession().catch(function (e) {
     api.log("error", "Couldn't clear the stored session: " + errorText(e));
   });
@@ -642,7 +572,7 @@ function signInWithCode() {
     });
 }
 
-// The code is in the view too, so a browser that won't open isn't the end:
+// The code is in the settings panel too, so a browser that won't open isn't the end:
 // the person can type it at community.viboplr.com/device on any device.
 function openSignInPage() {
   if (!state.auth || state.auth.mode !== "device") return Promise.resolve();
@@ -716,7 +646,7 @@ function completeSignIn(data) {
     .then(function () {
       notify("Signed in to Viboplr Community as @" + state.user.login + ".");
       render();
-      return Promise.all([loadShared(), redrawTabs(true), sendPlaysAndReport()]);
+      return Promise.all([redrawTabs(true), sendPlaysAndReport()]);
     })
     .catch(function (e) {
       render();
@@ -735,7 +665,6 @@ function signOut() {
     .then(function () {
       state.token = null;
       state.user = null;
-      clearShared();
       return saveSession();
     })
     .then(function () {
@@ -749,21 +678,6 @@ function signOut() {
 // Loading
 // ---------------------------------------------------------------------------
 
-function withLoading(work) {
-  state.loading = true;
-  state.error = null;
-  render();
-  return work()
-    .catch(function (e) {
-      if (e && e.status !== 401) state.error = errorText(e);
-      api.log("error", "Community request failed: " + errorText(e));
-    })
-    .then(function () {
-      state.loading = false;
-      render();
-    });
-}
-
 // Ask the server what can be shared; keep the answer for the next start.
 function loadModules() {
   return request("GET", "/v1/modules")
@@ -771,7 +685,6 @@ function loadModules() {
       var mods = validModules(data && data.modules);
       if (!mods.length) return;
       state.modules = mods;
-      render();
       return api.storage.set("modules", mods);
     })
     .catch(function (e) {
@@ -779,50 +692,11 @@ function loadModules() {
     });
 }
 
-// What this user shared, per module.
-function loadShared() {
-  if (!state.token) {
-    clearShared();
-    return Promise.resolve();
-  }
-  return request("GET", "/v1/me/items", undefined, true).then(function (data) {
-    var byKind = {};
-    data.items.forEach(function (item) {
-      (byKind[item.kind] = byKind[item.kind] || []).push(item);
-    });
-    state.shared = byKind;
-    render();
-  });
-}
-
-function loadMine() {
-  return withLoading(function () {
-    var loads = state.modules.map(function (m) {
-      var integration = INTEGRATIONS[m.kind];
-      return integration && integration.mine && integration.mine.load ? integration.mine.load() : Promise.resolve();
-    });
-    return Promise.all(loads).then(loadShared);
-  });
-}
-
-// Every visit to You re-reads it, so what changed since (a sheet published
-// from a song's tab, an item removed on the website) shows without a restart.
-function switchTab(tab) {
-  state.tab = tab === SETTINGS ? SETTINGS : MINE;
-  state.error = null;
-  // Settings reads nothing from the server: everything on it is local state.
-  if (state.tab === SETTINGS) return Promise.resolve(render());
-  return loadMine();
-}
-
 function knownItem(id) {
   var lists = [];
   Object.keys(state.tabs).forEach(function (k) {
     var t = state.tabs[k];
     lists.push(t.cues || [], t.lyrics || []);
-  });
-  Object.keys(state.shared).forEach(function (k) {
-    lists.push(state.shared[k]);
   });
   for (var i = 0; i < lists.length; i++) {
     for (var j = 0; j < lists[i].length; j++) if (lists[i][j].id === id) return lists[i][j];
@@ -987,8 +861,8 @@ function registerSongCounts() {
 // "toast" for the toast's Import, "auto" for Import automatically) never asks:
 // the user didn't pick it on its page, so when the song has a sheet by now it
 // is left alone — and the toast path says so. Resolves with what happened:
-// "imported", "own" (skipped: the song has a sheet), "confirm" (the in-view
-// question is up) or "failed".
+// "imported", "own" (skipped: the song has a sheet), "confirm" (a notice asks
+// whether to replace it) or "failed".
 function importItem(id, confirmed, opts) {
   var suggestion = (opts && opts.suggestion) || null;
   return request("GET", "/v1/items/" + encodeURIComponent(id))
@@ -1005,8 +879,7 @@ function importItem(id, confirmed, opts) {
         var rec = state.imports[key];
         var sameImport = rec && existing && rec.id === item.id && rec.updatedAt === existing.updatedAt;
         if (existing && !confirmed && !sameImport) {
-          state.confirm = { kind: "replace", id: item.id, title: item.title, artist: item.artistName, by: item.publisher.login };
-          render();
+          askInNotice({ kind: "replace", id: item.id, title: item.title, artist: item.artistName, by: item.publisher.login });
           return "confirm";
         }
         var meta = { author: importAuthor(item) };
@@ -1021,9 +894,7 @@ function importItem(id, confirmed, opts) {
           .then(function () {
             if (!api) return "imported";
             countUse(item.id);
-            state.local = null;
             notify("Imported the cue sheet for “" + item.title + "”. It plays in Now Playing.");
-            render();
             return "imported";
           });
       });
@@ -1044,12 +915,6 @@ function requireSignIn(what) {
   if (state.token) return true;
   notify("Sign in with GitHub to " + what + ".", { action: { label: "Sign in", id: "sign-in" } });
   return false;
-}
-
-function sharedSheet(key) {
-  var list = state.shared.cue_sheet || [];
-  for (var i = 0; i < list.length; i++) if (songKey(list[i].title, list[i].artistName) === key) return list[i];
-  return null;
 }
 
 // The album artist of a song's album, so a compilation track files under
@@ -1151,15 +1016,10 @@ function publishSong(title, artist) {
           true
         );
       }).then(function (data) {
-        var list = (state.shared.cue_sheet || []).filter(function (it) {
-          return it.id !== data.item.id;
-        });
-        state.shared.cue_sheet = list.concat([data.item]);
         state.lastPublishedUrl = data.item.url;
         notify((data.created ? "Published “" : "Updated “") + row.title + "” on Viboplr Community.", {
           action: { label: "Open page", id: "open-last-published" },
         });
-        render();
       });
     })
     .catch(function (e) {
@@ -1167,80 +1027,11 @@ function publishSong(title, artist) {
     });
 }
 
-function unpublishSheet(key) {
-  var item = sharedSheet(key);
-  if (!item) return Promise.resolve();
-  return request("DELETE", "/v1/items/" + encodeURIComponent(item.id), undefined, true)
-    .then(function () {
-      state.shared.cue_sheet = (state.shared.cue_sheet || []).filter(function (it) {
-        return it.id !== item.id;
-      });
-      notify("Unpublished “" + item.title + "”. Your own copy is unchanged.");
-      render();
-    })
-    .catch(function (e) {
-      fail("Couldn't unpublish", e);
-    });
-}
-
-function localByKey(key) {
-  var rows = state.local || [];
-  for (var i = 0; i < rows.length; i++) if (songKey(rows[i].title, rows[i].artistName) === key) return rows[i];
-  return null;
-}
-
-// One local sheet → a row on You, given what the user published and imported.
-function localRow(sheet, published, imported) {
-  var key = songKey(sheet.title, sheet.artistName);
-  var cues = (sheet.sheet && sheet.sheet.cues) || [];
-  var bits = [];
-  if (sheet.artistName) bits.push(sheet.artistName);
-  bits.push(plural(cues.length, "cue", "cues") + " · " + (sheet.sheet && sheet.sheet.mode === "clip" ? "lyric clip" : "cards"));
-  if (sheet.author) bits.push(sheet.author);
-  var row = { id: key, title: sheet.title, subtitle: bits.join(" · "), artistName: sheet.artistName || null, albumTitle: sheet.albumName || null };
-  var untouchedImport = imported && imported.updatedAt === sheet.updatedAt;
-  if (published) {
-    row.badge = { label: "Published", variant: "success" };
-    row.actions = ["republish", "unpublish", "sheet-page"];
-  } else if (untouchedImport) {
-    row.badge = { label: "From the community", variant: "muted" };
-    row.actions = [];
-  } else {
-    row.actions = ["publish"];
-  }
-  return row;
-}
-
-function mySheetNodes() {
-  var rows = state.local || [];
-  if (rows.length === 0) {
-    return [{ type: "text", content: "You have no cue sheets yet. Ask your AI assistant to write one for a song, or import one." }];
-  }
-  return [
-    {
-      type: "track-row-list",
-      selectable: true,
-      selectionMode: "single",
-      artwork: "cached",
-      contextMenu: false,
-      actions: withIcons([
-        { id: "publish", label: "Publish" },
-        { id: "republish", label: "Update online" },
-        { id: "unpublish", label: "Unpublish" },
-        { id: "sheet-page", label: "Open page" },
-      ]),
-      items: rows.map(function (sheet) {
-        var key = songKey(sheet.title, sheet.artistName);
-        return localRow(sheet, sharedSheet(key), state.imports[key]);
-      }),
-    },
-  ];
-}
-
 // A share link (viboplr://plugin/community/open?id=…), the website's "Open in
-// Vibo": a cue sheet or synced lyrics ask to import, a mixtape asks to save —
-// on You, over what's yours. Anything else (a kind this build doesn't know)
-// has nothing to take into the app, so its page opens.
+// Vibo": a notice asks to import a cue sheet or synced lyrics, or to save a
+// mixtape, and its button does it. Unanswered, it waits in the notifications
+// list. Anything else (a kind this build doesn't know) has nothing to take
+// into the app, so its page opens.
 function openShared(id) {
   if (!id) return Promise.resolve();
   return request("GET", "/v1/items/" + encodeURIComponent(id), undefined, !!state.token)
@@ -1248,14 +1039,12 @@ function openShared(id) {
       var item = data.item;
       var by = item.publisher && item.publisher.login;
       if (item.kind === "mixtape") {
-        state.confirm = { kind: "save-mixtape", id: item.id, title: item.title, by: by, count: payloadTracks(item).length };
+        askInNotice({ kind: "save-mixtape", id: item.id, title: item.title, by: by, count: payloadTracks(item).length });
       } else if (item.kind === "cue_sheet" || item.kind === "synced_lyrics") {
-        state.confirm = { kind: item.kind === "synced_lyrics" ? "import-lyrics" : "import", id: item.id, title: item.title, artist: item.artistName, by: by };
+        askInNotice({ kind: item.kind === "synced_lyrics" ? "import-lyrics" : "import", id: item.id, title: item.title, artist: item.artistName, by: by });
       } else {
         return api.network.openUrl(item.url);
       }
-      api.ui.navigateToView(VIEW);
-      return switchTab(MINE);
     })
     .catch(function (e) {
       if (e && e.status === 404) notify("That isn't in the community any more.");
@@ -1327,8 +1116,8 @@ function lyricsSource(value) {
 }
 
 // Import community lyrics. Asks first when the song already has synced lyrics
-// that didn't come from this same item — in the view, or through `ask(confirm)`
-// when the caller shows the question somewhere else (the Community tab).
+// that didn't come from this same item — in a notice, or through
+// `ask(confirm)` when the caller shows the question itself (the Community tab).
 function importLyrics(id, confirmed, ask) {
   if (!canSaveLyrics()) {
     notify("Importing synced lyrics needs Viboplr 1.0.94 or later.");
@@ -1356,10 +1145,7 @@ function importLyrics(id, confirmed, ask) {
             from: lyricsSource(existing),
           };
           if (ask) ask(question);
-          else {
-            state.confirm = question;
-            render();
-          }
+          else askInNotice(question);
           return;
         }
         return api.lyrics
@@ -1378,7 +1164,6 @@ function importLyrics(id, confirmed, ask) {
           .then(function () {
             countUse(item.id);
             notify("Imported synced lyrics for “" + item.title + "”. They scroll along in Now Playing.");
-            render();
           });
       });
     })
@@ -1388,8 +1173,8 @@ function importLyrics(id, confirmed, ask) {
     });
 }
 
-// Undo an import: forget it, and ask the user's providers for the song again,
-// so whatever the app would have shown comes back.
+// Undo an import (the song's Community tab): forget it, and ask the user's
+// providers for the song again, so whatever the app would have shown comes back.
 function removeLyrics(key) {
   var rec = state.lyricsImports[key];
   if (!rec) return Promise.resolve();
@@ -1402,17 +1187,10 @@ function removeLyrics(key) {
     })
     .then(function () {
       notify("Undid the import of “" + rec.title + "”. It shows the lyrics your providers find again.");
-      render();
     })
     .catch(function (e) {
       fail("Couldn't undo that import", e);
     });
-}
-
-function sharedLyrics(key) {
-  var list = state.shared.synced_lyrics || [];
-  for (var i = 0; i < list.length; i++) if (songKey(list[i].title, list[i].artistName) === key) return list[i];
-  return null;
 }
 
 // Publish the synced lyrics the app has for a song, wherever they came from —
@@ -1437,12 +1215,7 @@ function publishLyricsCore(title, artist, album) {
         return request("POST", "/v1/items", body, true);
       })
       .then(function (data) {
-        var list = (state.shared.synced_lyrics || []).filter(function (it) {
-          return it.id !== data.item.id;
-        });
-        state.shared.synced_lyrics = list.concat([data.item]);
         state.lastPublishedUrl = data.item.url;
-        render();
         return { status: data.created ? "published" : "updated", item: data.item };
       });
   });
@@ -1513,7 +1286,9 @@ function publishLyricsTool(args) {
   var artist = args && typeof args.artistName === "string" && args.artistName.trim() ? args.artistName.trim() : null;
   var album = args && typeof args.albumName === "string" && args.albumName.trim() ? args.albumName.trim() : null;
   if (!state.token) {
-    throw new Error("Not signed in to Viboplr Community. Ask the user to sign in with GitHub in the Community view (You tab); you can't do that for them.");
+    throw new Error(
+      "Not signed in to Viboplr Community. Ask the user to sign in with GitHub in Extensions → Viboplr Community (or from a song's Community tab); you can't do that for them."
+    );
   }
   return canonicalSong(title, artist, album).then(function (song) {
     title = song.title;
@@ -1588,83 +1363,12 @@ function hasWaveformTool(args) {
   });
 }
 
-function unpublishLyrics(key) {
-  var item = sharedLyrics(key);
-  if (!item) return Promise.resolve();
-  return request("DELETE", "/v1/items/" + encodeURIComponent(item.id), undefined, true)
-    .then(function () {
-      state.shared.synced_lyrics = (state.shared.synced_lyrics || []).filter(function (it) {
-        return it.id !== item.id;
-      });
-      notify("Unpublished the synced lyrics for “" + item.title + "”. Your own copy is unchanged.");
-      render();
-    })
-    .catch(function (e) {
-      fail("Couldn't unpublish", e);
-    });
-}
-
-function myLyricsNodes() {
-  var rows = [];
-  Object.keys(state.lyricsImports).forEach(function (key) {
-    var rec = state.lyricsImports[key];
-    rows.push({
-      id: "imported:" + key,
-      title: rec.title,
-      subtitle: [rec.artist, rec.by ? "by @" + rec.by : null].filter(Boolean).join(" · "),
-      artistName: rec.artist || null,
-      badge: { label: "Imported", variant: "muted" },
-      actions: ["remove-lyrics", "lyrics-page"],
-    });
-  });
-  (state.shared.synced_lyrics || []).forEach(function (item) {
-    rows.push({
-      id: "published:" + songKey(item.title, item.artistName),
-      title: item.title,
-      subtitle: [item.artistName, plural(item.lineCount || 0, "line", "lines")].filter(Boolean).join(" · "),
-      artistName: item.artistName || null,
-      albumTitle: item.albumName || null,
-      badge: { label: "Published", variant: "success" },
-      actions: ["unpublish-lyrics", "lyrics-page"],
-    });
-  });
-  if (!rows.length) {
-    return [{ type: "text", content: "No synced lyrics yet. Right-click a track to publish its synced lyrics, or import some from the Synced lyrics tab." }];
-  }
-  return [
-    {
-      type: "track-row-list",
-      selectable: true,
-      selectionMode: "single",
-      artwork: "cached",
-      contextMenu: false,
-      actions: withIcons([
-        { id: "remove-lyrics", label: "Undo import" },
-        { id: "unpublish-lyrics", label: "Unpublish" },
-        { id: "lyrics-page", label: "Open page" },
-      ]),
-      items: rows,
-    },
-  ];
-}
-
-// A row id on You → its song key and which list it came from.
-function lyricsRowKey(id) {
-  var s = String(id || "");
-  var i = s.indexOf(":");
-  return i === -1 ? null : { list: s.slice(0, i), key: s.slice(i + 1) };
-}
-
 // ---------------------------------------------------------------------------
 // Mixtapes
 // ---------------------------------------------------------------------------
 
-function mixtapeKey(name) {
-  return "mixtape:" + fold(name);
-}
-
-// Any track shape we hold (a playlist row, a queue entry, a published track)
-// → what a mixtape carries. Metadata only: no path, URI or image, ever.
+// Any track shape we hold (a playlist row, a published track) → what a
+// mixtape carries. Metadata only: no path, URI or image, ever.
 function mixtapeTracks(tracks) {
   var out = [];
   (tracks || []).forEach(function (t) {
@@ -1687,6 +1391,8 @@ function hasPlaylistsApi() {
   return !!(api.playlists && typeof api.playlists.list === "function");
 }
 
+// Read every time it's needed: playlists change in the app behind our back
+// (a saved mixtape deleted, a new playlist made).
 function loadPlaylists() {
   if (!hasPlaylistsApi()) {
     state.playlists = [];
@@ -1698,7 +1404,7 @@ function loadPlaylists() {
       state.playlists = rows || [];
     })
     .catch(function (e) {
-      // Not fatal: the tab still lists and plays mixtapes, just without badges.
+      // Not fatal: saving then can't tell a newer version from a first save.
       api.log("error", "Couldn't read your playlists: " + errorText(e));
       state.playlists = [];
     });
@@ -1723,13 +1429,6 @@ function savedPlaylistFor(id) {
   return null;
 }
 
-function sharedMixtape(name) {
-  var key = mixtapeKey(name);
-  var list = state.shared.mixtape || [];
-  for (var i = 0; i < list.length; i++) if (mixtapeKey(list[i].title) === key) return list[i];
-  return null;
-}
-
 function fetchItem(id) {
   return request("GET", "/v1/items/" + encodeURIComponent(id)).then(function (data) {
     return data.item;
@@ -1747,7 +1446,7 @@ function saveMixtape(id) {
     notify("This version of Viboplr can't save playlists from a plugin.");
     return Promise.resolve();
   }
-  return Promise.all([fetchItem(id), state.playlists ? Promise.resolve() : loadPlaylists()])
+  return Promise.all([fetchItem(id), loadPlaylists()])
     .then(function (vals) {
       var item = vals[0];
       var previous = savedPlaylistFor(item.id);
@@ -1775,11 +1474,7 @@ function saveMixtape(id) {
         })
         .then(function () {
           if (!previous) countUse(item.id);
-          return loadPlaylists();
-        })
-        .then(function () {
           notify((previous ? "Updated “" : "Saved “") + item.title + "” in your Playlists.");
-          render();
         });
     })
     .catch(function (e) {
@@ -1795,15 +1490,10 @@ function publishMixtape(name, description, tracks) {
     return Promise.resolve();
   }
   return request("POST", "/v1/items", { kind: "mixtape", title: name, description: description || undefined, tracks: list }, true).then(function (data) {
-    var shared = (state.shared.mixtape || []).filter(function (it) {
-      return it.id !== data.item.id;
-    });
-    state.shared.mixtape = shared.concat([data.item]);
     state.lastPublishedUrl = data.item.url;
     notify((data.created ? "Published “" : "Updated “") + name + "” on Viboplr Community.", {
       action: { label: "Open page", id: "open-last-published" },
     });
-    render();
   });
 }
 
@@ -1813,79 +1503,37 @@ function playlistById(id) {
   return null;
 }
 
-function publishPlaylist(id, fallbackName) {
+// Only a playlist the user saved is published: never the queue, never one of
+// the app's own (Liked / Disliked, the mixes it regenerates), and never a
+// mixtape saved from the community.
+function publishPlaylist(id) {
   if (!requireSignIn("publish")) return Promise.resolve();
   if (!hasPlaylistsApi()) {
     notify("This version of Viboplr doesn't let plugins read playlists.");
     return Promise.resolve();
   }
-  var read = state.playlists ? Promise.resolve() : loadPlaylists();
-  return read
+  return loadPlaylists()
     .then(function () {
       var playlist = playlistById(id);
-      if (playlist && communityMeta(playlist)) {
+      if (!playlist) {
+        notify("Couldn't find that playlist in your Playlists, so nothing was published.");
+        return;
+      }
+      if (isSpecialPlaylist(playlist)) {
+        notify("“" + playlist.name + "” is made by Viboplr, so it can't be published. Save the songs as a playlist of your own to share them.");
+        return;
+      }
+      if (communityMeta(playlist)) {
         notify("This playlist came from the community, so it isn't yours to publish.");
         return;
       }
-      var name = (playlist && playlist.name) || fallbackName;
       return api.playlists.getTracks(Number(id)).then(function (tracks) {
-        return publishMixtape(name, playlist && playlist.description, tracks);
+        return publishMixtape(playlist.name, playlist.description, tracks);
       });
     })
     .catch(function (e) {
       fail("Couldn't publish", e);
     });
-}
-
-function publishQueue(name) {
-  name = String(name || "").trim();
-  if (!name) {
-    notify("Give the mixtape a name first.");
-    return Promise.resolve();
-  }
-  if (!requireSignIn("publish")) return Promise.resolve();
-  var queue = api.playback && typeof api.playback.getQueue === "function" ? api.playback.getQueue() : null;
-  if (!queue || !queue.tracks || !queue.tracks.length) {
-    notify("The queue is empty.");
-    return Promise.resolve();
-  }
-  return publishMixtape(name, null, queue.tracks).catch(function (e) {
-    fail("Couldn't publish", e);
-  });
-}
-
-function unpublishMixtape(name) {
-  var item = sharedMixtape(name);
-  if (!item) return Promise.resolve();
-  return request("DELETE", "/v1/items/" + encodeURIComponent(item.id), undefined, true)
-    .then(function () {
-      state.shared.mixtape = (state.shared.mixtape || []).filter(function (it) {
-        return it.id !== item.id;
-      });
-      notify("Unpublished “" + item.title + "”. Your playlist is unchanged.");
-      render();
-    })
-    .catch(function (e) {
-      fail("Couldn't unpublish", e);
-    });
-}
-
-// One saved playlist → a row on You, given what the user published.
-function playlistRow(playlist, published) {
-  var bits = [plural(playlist.trackCount || 0, "track", "tracks")];
-  var row = { id: String(playlist.id), title: playlist.name, subtitle: "", actions: [] };
-  var from = communityMeta(playlist);
-  if (from) {
-    if (from.communityBy) bits.push("by @" + from.communityBy);
-    row.badge = { label: "From the community", variant: "muted" };
-  } else if (published) {
-    row.badge = { label: "Published", variant: "success" };
-    row.actions = ["republish-playlist", "unpublish-mixtape", "mixtape-page"];
-  } else {
-    row.actions = ["publish-playlist"];
-  }
-  row.subtitle = bits.join(" · ");
-  return row;
 }
 
 // The app's own playlists: Liked / Disliked (seeded under these names, which
@@ -1898,43 +1546,6 @@ function isSpecialPlaylist(p) {
   var m = p && p.metadata;
   if (m && typeof m.recipe === "string") return true;
   return !m && SPECIAL_PLAYLIST_NAMES.indexOf(p && p.name) !== -1;
-}
-
-// The playlists You offers: the user's own. Never a special one, and never an
-// empty one — unless it is already published, so it can still be unpublished.
-function minePlaylists() {
-  return (state.playlists || []).filter(function (p) {
-    if (isSpecialPlaylist(p)) return false;
-    if (!communityMeta(p) && sharedMixtape(p.name)) return true;
-    return (p.trackCount || 0) > 0;
-  });
-}
-
-function myPlaylistNodes() {
-  var nodes = [];
-  var rows = minePlaylists();
-  if (rows.length === 0) {
-    nodes.push({ type: "text", content: "You have no saved playlists yet. Save one from the queue, or save a mixtape someone shared." });
-  } else {
-    nodes.push({
-      type: "track-row-list",
-      selectable: true,
-      selectionMode: "single",
-      contextMenu: false,
-      actions: withIcons([
-        { id: "publish-playlist", label: "Publish" },
-        { id: "republish-playlist", label: "Update online" },
-        { id: "unpublish-mixtape", label: "Unpublish" },
-        { id: "mixtape-page", label: "Open page" },
-      ]),
-      items: rows.map(function (p) {
-        return playlistRow(p, communityMeta(p) ? null : sharedMixtape(p.name));
-      }),
-    });
-  }
-  nodes.push({ type: "text", content: "Or publish what's in the queue right now:", className: "ds-muted" });
-  nodes.push({ type: "search-input", placeholder: "Name the mixtape", action: "publish-queue", value: "", submitOnly: true, buttonLabel: "Publish the queue" });
-  return nodes;
 }
 
 // ---------------------------------------------------------------------------
@@ -2303,6 +1914,11 @@ function tabTree(data) {
     if (data.localSheet) top.push({ type: "button", label: "Publish my cue sheet", action: "tab-publish-sheet", variant: "secondary" });
     top.push({ type: "button", label: "Publish my synced lyrics", action: "tab-publish-lyrics", variant: "secondary" });
   }
+  // Here rather than on the imported row: it works after those lyrics have
+  // left the community too, and needs no sign-in.
+  if (e.kind === "track" && state.lyricsImports[songKey(e.name, e.artistName)]) {
+    top.push({ type: "button", label: "Undo lyrics import", action: "tab-undo-lyrics", variant: "secondary" });
+  }
   var children = [];
   // A question the tab asked (replace the song's synced lyrics?) comes first,
   // where the button that raised it was pressed.
@@ -2525,6 +2141,12 @@ var TAB_ACTIONS = {
       return refreshTab(e, true);
     }) : Promise.resolve();
   },
+  "tab-undo-lyrics": function (p) {
+    var e = entityOf(p);
+    return e ? removeLyrics(songKey(e.name, e.artistName)).then(function () {
+      return refreshTab(e, false);
+    }) : Promise.resolve();
+  },
   "open-subject": function (p) {
     var id = itemIdOf(p, "subject:");
     openSubject(id && state.subjectsById[id]);
@@ -2546,8 +2168,8 @@ function tabImport(p) {
 
 // Synced lyrics from the tab. Their button says only "Import", so replacing
 // synced lyrics the song already has — which may be the user's own edit, and
-// Undo can't bring back — asks first, in the tab itself: the view's confirm is
-// on a page the user isn't looking at.
+// Undo can't bring back — asks first, in the tab itself, where the button was
+// pressed.
 function tabImportLyrics(p) {
   var id = rowId(p);
   if (!id) return Promise.resolve();
@@ -2779,7 +2401,10 @@ function onTrackScrobbled(track) {
   return savePlayQueue().then(sendPlays).then(playReport);
 }
 
+// Every change to what's waiting comes through here, and the settings panel
+// says how many plays wait, so it is redrawn too.
 function savePlayQueue() {
+  render();
   return api.storage.set("playQueue", state.playQueue).catch(function (e) {
     api.log("error", "Couldn't save the plays waiting to be sent: " + errorText(e));
   });
@@ -2836,8 +2461,6 @@ function sendPlays() {
       if (!done || !api) return;
       state.playQueue = state.playQueue.slice(batch.length);
       return savePlayQueue().then(function () {
-        // Settings shows how many plays are waiting.
-        if (state.tab === SETTINGS) render();
         if (state.playQueue.length) return sendPlays();
       });
     });
@@ -3309,26 +2932,6 @@ function waveformNodes() {
 // Rendering
 // ---------------------------------------------------------------------------
 
-function setHeader() {
-  if (typeof api.ui.setViewHeader !== "function") return;
-  var status;
-  var account;
-  if (state.auth) {
-    status = { variant: "warning", label: "Signing in…" };
-    account = [{ label: "Cancel sign-in", action: "cancel-sign-in", variant: "secondary" }];
-  } else if (state.user) {
-    status = { variant: "success", label: "@" + state.user.login };
-    account = [{ label: "Sign out", action: "sign-out", variant: "secondary" }];
-  } else {
-    status = { variant: "muted", label: "Signed out" };
-    account = [
-      { label: "Sign in with GitHub", action: "sign-in", variant: "accent" },
-      { label: "Sign in with a code", action: "sign-in-code", variant: "secondary" },
-    ];
-  }
-  api.ui.setViewHeader(VIEW, { status: status, actions: account.concat([{ label: "Open website", action: "open-site", variant: "secondary" }]) });
-}
-
 function banner(text, variant, buttons) {
   return {
     type: "layout",
@@ -3338,201 +2941,20 @@ function banner(text, variant, buttons) {
   };
 }
 
-function shareButton(m) {
-  return m.shareUrl ? { type: "button", label: "Share a " + m.singular, action: "share", variant: "secondary", data: { kind: m.kind } } : null;
-}
-
-// Settings: every switch the plugin has, then a way to the host-drawn ones
-// (permissions, which menu items and views show) on its Extensions page.
-function settingsNodes() {
-  var nodes = [
-    { type: "section", title: "While you listen", children: tickNodes().concat(cueSuggestNodes()) },
-    { type: "section", title: "Send from Viboplr", children: scrobbleNodes().concat(likeSyncNodes()) },
-    { type: "section", title: "Share with Viboplr Community", children: waveformNodes() },
-  ];
-  if (versionAtLeast(api.appVersion, EXTENSION_SETTINGS_MIN_APP)) {
-    nodes.push({
-      type: "section",
-      title: "Extension",
-      children: [
-        {
-          type: "settings-row",
-          label: "Permissions, menu items and views",
-          description: "What Viboplr Community may do, which of its right-click items and views show, and switching it off. Viboplr keeps these on its Extensions page.",
-          control: { type: "button", label: "Open in Extensions", action: "open-extension-settings", variant: "secondary" },
-        },
-      ],
-    });
-  }
-  return nodes;
-}
-
-// "1.0.103" >= "1.0.94", numerically per part; anything unreadable is "no".
-function versionAtLeast(have, want) {
-  if (typeof have !== "string") return false;
-  var a = have.split(/[.-]/);
-  var b = want.split(".");
-  for (var i = 0; i < b.length; i++) {
-    var x = parseInt(a[i], 10);
-    var y = parseInt(b[i], 10);
-    if (isNaN(x)) return false;
-    if (x !== y) return x > y;
-  }
-  return true;
-}
-
-// You: what's shareable from this computer and what you shared — a section
-// per module. Browsing is the website's; the switches live on Settings.
-function mineNodes() {
-  var nodes = [
-    {
-      type: "layout",
-      direction: "horizontal",
-      children: [
-        { type: "text", className: "ds-muted", content: "Songs, mixtapes and Subsonic servers people shared are on the website. Its “Open in Vibo” brings one here." },
-        { type: "button", label: "Browse Community", action: "open-site", variant: "secondary" },
-      ],
-    },
-  ];
-  if (!state.token) {
-    nodes.push(banner("Sign in with GitHub to share, and to see what you've shared.", "muted", [{ type: "button", label: "Sign in", action: "sign-in", variant: "accent" }]));
-  }
-  if (state.loading && !state.local && !Object.keys(state.shared).length) {
-    nodes.push({ type: "loading", message: "Reading what's yours…" });
-    return nodes;
-  }
-  state.modules.forEach(function (m) {
-    var integration = INTEGRATIONS[m.kind];
-    if (integration && integration.mine) {
-      nodes.push({ type: "section", title: integration.mine.title, children: integration.mine.nodes() });
-    } else {
-      nodes.push({ type: "section", title: "Your " + pluralOf(m), children: sharedNodes(m) });
-    }
-  });
-  nodes.push({
-    type: "layout",
-    direction: "horizontal",
-    children: [
-      { type: "text", className: "ds-muted", content: "Everything you added — likes, comments, plays, waveforms, and a history of it all — is on your page on the website." },
-      { type: "button", label: "Open my page", action: "open-my-page", variant: "secondary" },
-    ],
-  });
-  return nodes;
-}
-
-// The generic section on You: the items you shared in a module.
-function sharedNodes(m) {
-  var share = shareButton(m);
-  var tail = share ? [share] : [];
-  if (!state.token) return [{ type: "text", content: "Sign in to see the " + pluralOf(m) + " you shared." }].concat(tail);
-  var mine = state.shared[m.kind] || [];
-  if (!mine.length) return [{ type: "text", content: "You haven't shared any " + pluralOf(m) + "." }].concat(tail);
-  var actions = [{ id: "page", label: "Open page" }];
-  if (m.shareUrl) actions.push({ id: "edit", label: "Edit" });
-  return [
-    {
-      type: "track-row-list",
-      selectable: true,
-      selectionMode: "single",
-      contextMenu: false,
-      actions: withIcons(actions),
-      items: mine.map(function (item) {
-        var row = cardRow(m, item);
-        row.actions = actions.map(function (a) {
-          return a.id;
-        });
-        return row;
-      }),
-    },
-  ].concat(tail);
-}
-
-function confirmNode(c) {
-  c = c || state.confirm;
-  var forSong = "“" + c.title + "”" + (c.artist ? " by " + c.artist : "");
-  if (c.kind === "import-lyrics") {
-    return {
-      type: "confirm",
-      title: "Import these synced lyrics?",
-      message: "@" + c.by + "'s synced lyrics for " + forSong + " will scroll along in Now Playing.",
-      confirmLabel: "Import",
-      confirmAction: "confirm-import-lyrics",
-      cancelAction: "cancel-confirm",
-      data: { id: c.id },
-    };
-  }
-  if (c.kind === "replace-lyrics") {
-    return {
-      type: "confirm",
-      title: "Use these synced lyrics instead?",
-      message:
-        forSong + " already has synced lyrics" + (c.from ? " (from " + c.from + ")" : "") + ". Importing @" + c.by +
-        "'s shows theirs instead — undo the import later (Community → You) and yours come back.",
-      confirmLabel: "Import",
-      confirmAction: "confirm-replace-lyrics",
-      cancelAction: "cancel-confirm",
-      data: { id: c.id },
-    };
-  }
-  if (c.kind === "save-mixtape") {
-    return {
-      type: "confirm",
-      title: "Save this mixtape?",
-      message: "@" + c.by + "'s mixtape “" + c.title + "” (" + plural(c.count, "track", "tracks") + ") will be added to your Playlists.",
-      confirmLabel: "Save to Playlists",
-      confirmAction: "confirm-save-mixtape",
-      cancelAction: "cancel-confirm",
-      data: { id: c.id },
-    };
-  }
-  var song = "“" + c.title + "”" + (c.artist ? " by " + c.artist : "");
-  if (c.kind === "replace") {
-    return {
-      type: "confirm",
-      title: "Replace your cue sheet?",
-      message: "You already have a cue sheet for " + song + ". Importing @" + c.by + "'s replaces it.",
-      confirmLabel: "Replace",
-      confirmVariant: "danger",
-      confirmAction: "confirm-replace",
-      cancelAction: "cancel-confirm",
-      data: { id: c.id },
-    };
-  }
-  return {
-    type: "confirm",
-    title: "Import this cue sheet?",
-    message: "@" + c.by + "'s cue sheet for " + song + " will play over that song in Now Playing.",
-    confirmLabel: "Import",
-    confirmAction: "confirm-import",
-    cancelAction: "cancel-confirm",
-    data: { id: c.id },
-  };
-}
-
-function render() {
-  if (!api) return;
-  setHeader();
-  var children = [
-    {
-      type: "tabs",
-      action: "tab",
-      activeTab: state.tab,
-      tabs: [
-        { id: MINE, label: "You" },
-        { id: SETTINGS, label: "Settings" },
-      ],
-    },
-  ];
-  if (state.confirm) children.push(confirmNode());
+// The account: who's signed in, or the two ways to sign in, and a sign-in on
+// its way (the device code must stay readable here, in case the browser didn't
+// open). Then the way to everything you added, which lives on the website.
+function accountNodes() {
+  var nodes = [];
   if (state.auth && state.auth.mode === "link") {
-    children.push(
+    nodes.push(
       banner("Finish signing in in your browser. Viboplr will pick it up when you're done. If it doesn't, sign in with a code instead.", "muted", [
         { type: "button", label: "Use a code instead", action: "sign-in-code", variant: "secondary" },
         { type: "button", label: "Cancel", action: "cancel-sign-in", variant: "secondary" },
       ])
     );
   } else if (state.auth) {
-    children.push(
+    nodes.push(
       banner(
         "To sign in, confirm the code " + state.auth.userCode + " in your browser, or enter it at " + SERVER.replace(/^https?:\/\//, "") + "/device on any device. Viboplr signs you in as soon as you do.",
         "muted",
@@ -3542,12 +2964,124 @@ function render() {
         ]
       )
     );
+  } else if (state.user) {
+    nodes.push({
+      type: "settings-row",
+      label: "Signed in as @" + state.user.login,
+      description: "What you publish, like and comment on, and the plays, likes and waveforms Viboplr sends, go under this GitHub account.",
+      control: { type: "button", label: "Sign out", action: "sign-out", variant: "secondary" },
+    });
+  } else {
+    nodes.push({
+      type: "settings-row",
+      label: "Signed out",
+      description:
+        "Sign in with GitHub to publish, like and comment, and to send your plays, likes and waveforms. Importing needs no account. If your browser can't hand the sign-in back to Viboplr (some company networks), sign in with a code.",
+    });
+    nodes.push({
+      type: "layout",
+      direction: "horizontal",
+      children: [
+        { type: "button", label: "Sign in with GitHub", action: "sign-in", variant: "accent" },
+        { type: "button", label: "Sign in with a code", action: "sign-in-code", variant: "secondary" },
+      ],
+    });
   }
-  if (state.error) {
-    children.push(banner("Couldn't reach Viboplr Community: " + state.error, "warning", [{ type: "button", label: "Try again", action: "retry", variant: "accent" }]));
+  nodes.push({
+    type: "layout",
+    direction: "horizontal",
+    children: [
+      {
+        type: "text",
+        className: "ds-muted",
+        content: "Everything shared is on the website, and so is everything you added — to edit, unpublish or delete.",
+      },
+      state.user
+        ? { type: "button", label: "Open my page", action: "open-my-page", variant: "secondary" }
+        : { type: "button", label: "Open website", action: "open-site", variant: "secondary" },
+    ],
+  });
+  return nodes;
+}
+
+// The settings panel: the account, then every switch the plugin has.
+function settingsNodes() {
+  return [
+    { type: "section", title: "Account", children: accountNodes() },
+    { type: "section", title: "While you listen", children: tickNodes().concat(cueSuggestNodes()) },
+    { type: "section", title: "Send from Viboplr", children: scrobbleNodes().concat(likeSyncNodes()) },
+    { type: "section", title: "Share with Viboplr Community", children: waveformNodes() },
+  ];
+}
+
+// What a question says: a title, the details, and its button's label. Asked in
+// a notice (askInNotice), or in a song's Community tab (confirmNode).
+function confirmMessage(c) {
+  var forSong = "“" + c.title + "”" + (c.artist ? " by " + c.artist : "");
+  if (c.kind === "import-lyrics") {
+    return { title: "Import these synced lyrics?", message: "@" + c.by + "'s synced lyrics for " + forSong + " will scroll along in Now Playing.", label: "Import" };
   }
-  var body = state.tab === SETTINGS ? settingsNodes() : mineNodes();
-  api.ui.setViewData(VIEW, { type: "layout", direction: "vertical", children: children.concat(body) }, { scrollKey: state.tab });
+  if (c.kind === "replace-lyrics") {
+    return {
+      title: "Use these synced lyrics instead?",
+      message:
+        forSong + " already has synced lyrics" + (c.from ? " (from " + c.from + ")" : "") + ". Importing @" + c.by +
+        "'s shows theirs instead — Undo lyrics import on the song's Community tab brings yours back.",
+      label: "Import",
+    };
+  }
+  if (c.kind === "save-mixtape") {
+    return { title: "Save this mixtape?", message: "@" + c.by + "'s mixtape “" + c.title + "” (" + plural(c.count, "track", "tracks") + ") will be added to your Playlists.", label: "Save to Playlists" };
+  }
+  if (c.kind === "replace") {
+    return { title: "Replace your cue sheet?", message: "You already have a cue sheet for " + forSong + ". Importing @" + c.by + "'s replaces it.", label: "Replace" };
+  }
+  return { title: "Import this cue sheet?", message: "@" + c.by + "'s cue sheet for " + forSong + " will play over that song in Now Playing.", label: "Import" };
+}
+
+// The tab's own question (replace the song's synced lyrics?); tabTree names
+// the actions.
+function confirmNode(c) {
+  var m = confirmMessage(c);
+  return { type: "confirm", title: m.title, message: m.message, confirmLabel: m.label, data: { id: c.id } };
+}
+
+// Questions that replace something the user has, and those that only add.
+var REPLACING = ["replace", "replace-lyrics"];
+
+// Ask in a notice; its button answers. A notice's button carries no payload,
+// so the latest question of its sort is the one a button answers — and the
+// two sorts have their own button, so an "Import" left over from an earlier
+// link can never be what replaces a sheet. Unanswered, a notice with a button
+// waits in the notifications list.
+function askInNotice(q) {
+  var replacing = REPLACING.indexOf(q.kind) >= 0;
+  var m = confirmMessage(q);
+  if (replacing) state.pending.replace = q;
+  else state.pending.open = q;
+  notify(m.title + " " + m.message, replacing ? { action: { label: m.label, id: "answer-replace" }, kind: "warning" } : { action: { label: m.label, id: "answer-open" } });
+}
+
+function answerNotice(slot) {
+  var q = state.pending[slot];
+  state.pending[slot] = null;
+  if (!q) {
+    notify("That was already answered.");
+    return Promise.resolve();
+  }
+  if (q.kind === "save-mixtape") return saveMixtape(q.id);
+  var done = q.kind === "import-lyrics" || q.kind === "replace-lyrics" ? importLyrics(q.id, q.kind === "replace-lyrics") : importItem(q.id, q.kind === "replace");
+  // The song's Community tab, if it was loaded, shows the import (its badge,
+  // Undo lyrics import) now rather than when the host's cache runs out.
+  return done.then(function () {
+    var song = trackEntity(q.title, q.artist || null);
+    if (api && state.tabs[tabKey(song)]) return refreshTab(song, true);
+  });
+}
+
+function render() {
+  if (!api) return;
+  api.ui.setViewData(PANEL, { type: "layout", direction: "vertical", children: settingsNodes() });
 }
 
 // ---------------------------------------------------------------------------
@@ -3559,24 +3093,11 @@ function rowId(payload) {
 }
 
 var ACTIONS = {
-  // --- every module ---
-  tab: function (p) {
-    return switchTab(p && p.tabId);
-  },
+  // A shared item's page (a row on a song's Community tab).
   page: function (p) {
     return api.network.openUrl(pageFor(rowId(p)));
   },
-  edit: function (p) {
-    return api.network.openUrl(pageFor(rowId(p)) + "/edit");
-  },
-  share: function (p) {
-    var m = moduleFor(p && p.kind);
-    return m && m.shareUrl ? api.network.openUrl(m.shareUrl) : undefined;
-  },
-  retry: function () {
-    return switchTab(state.tab);
-  },
-  // --- you ---
+  // --- settings ---
   "toggle-ticks": function (p) {
     return setTicks(p && p.value);
   },
@@ -3586,9 +3107,6 @@ var ACTIONS = {
   },
   "open-my-plays": function () {
     return api.network.openUrl(SERVER + "/me?tab=plays");
-  },
-  "open-extension-settings": function () {
-    api.ui.requestAction("open-extension-settings", {});
   },
   "toggle-sync-likes": function (p) {
     if (!state.token) return Promise.resolve(render());
@@ -3601,103 +3119,24 @@ var ACTIONS = {
   "set-cue-suggest": function (p) {
     return setCueSuggest(p && p.value);
   },
-  // The "shared cue sheet" toast's button.
-  "import-suggested-cue": function () {
-    return importSuggestedCue();
-  },
   "open-my-page": function () {
     return api.network.openUrl(SERVER + "/me");
   },
-  // --- cue sheets ---
-  import: function (p) {
-    return importItem(rowId(p), false);
+  // --- notices' buttons ---
+  // The "shared cue sheet" toast's.
+  "import-suggested-cue": function () {
+    return importSuggestedCue();
   },
-  update: function (p) {
-    return importItem(rowId(p), true);
+  // A share link's "Import" / "Save to Playlists".
+  "answer-open": function () {
+    return answerNotice("open");
   },
-  publish: function (p) {
-    var row = localByKey(rowId(p));
-    return row ? publishSong(row.title, row.artistName) : Promise.resolve();
+  // "Replace" / "Import" over something the song already has.
+  "answer-replace": function () {
+    return answerNotice("replace");
   },
-  republish: function (p) {
-    return ACTIONS.publish(p);
-  },
-  unpublish: function (p) {
-    return unpublishSheet(rowId(p));
-  },
-  "sheet-page": function (p) {
-    var item = sharedSheet(rowId(p));
-    return item ? api.network.openUrl(item.url) : Promise.resolve();
-  },
-  "confirm-import": function (p) {
-    state.confirm = null;
-    render();
-    return importItem(p && p.id, false);
-  },
-  "confirm-replace": function (p) {
-    state.confirm = null;
-    render();
-    return importItem(p && p.id, true);
-  },
-  "cancel-confirm": function () {
-    state.confirm = null;
-    render();
-  },
-  // --- synced lyrics ---
-  "import-lyrics": function (p) {
-    return importLyrics(rowId(p), false);
-  },
-  "update-lyrics": function (p) {
-    return importLyrics(rowId(p), true);
-  },
-  "confirm-import-lyrics": function (p) {
-    state.confirm = null;
-    render();
-    return importLyrics(p && p.id, false);
-  },
-  "confirm-replace-lyrics": function (p) {
-    state.confirm = null;
-    render();
-    return importLyrics(p && p.id, true);
-  },
-  "remove-lyrics": function (p) {
-    var r = lyricsRowKey(rowId(p));
-    return r ? removeLyrics(r.key) : Promise.resolve();
-  },
-  "unpublish-lyrics": function (p) {
-    var r = lyricsRowKey(rowId(p));
-    return r ? unpublishLyrics(r.key) : Promise.resolve();
-  },
-  "lyrics-page": function (p) {
-    var r = lyricsRowKey(rowId(p));
-    if (!r) return Promise.resolve();
-    var rec = r.list === "imported" ? state.lyricsImports[r.key] : sharedLyrics(r.key);
-    return rec && rec.url ? api.network.openUrl(rec.url) : Promise.resolve();
-  },
-  // --- mixtapes ---
-  "confirm-save-mixtape": function (p) {
-    state.confirm = null;
-    render();
-    return saveMixtape(p && p.id);
-  },
-  "publish-playlist": function (p) {
-    var playlist = playlistById(rowId(p));
-    return playlist ? publishPlaylist(playlist.id, playlist.name) : Promise.resolve();
-  },
-  "republish-playlist": function (p) {
-    return ACTIONS["publish-playlist"](p);
-  },
-  "unpublish-mixtape": function (p) {
-    var playlist = playlistById(rowId(p));
-    return playlist ? unpublishMixtape(playlist.name) : Promise.resolve();
-  },
-  "mixtape-page": function (p) {
-    var playlist = playlistById(rowId(p));
-    var item = playlist && sharedMixtape(playlist.name);
-    return item ? api.network.openUrl(item.url) : Promise.resolve();
-  },
-  "publish-queue": function (p) {
-    return publishQueue(p && p.query);
+  "open-last-published": function () {
+    return state.lastPublishedUrl ? api.network.openUrl(state.lastPublishedUrl) : Promise.resolve();
   },
   // --- account ---
   "sign-in": function () {
@@ -3718,9 +3157,6 @@ var ACTIONS = {
   },
   "open-site": function () {
     return api.network.openUrl(SERVER);
-  },
-  "open-last-published": function () {
-    return state.lastPublishedUrl ? api.network.openUrl(state.lastPublishedUrl) : Promise.resolve();
   },
 };
 
@@ -3765,7 +3201,7 @@ function activate(pluginApi) {
   });
   api.contextMenu.onAction("publish-mixtape", function (target) {
     if (!target || target.playlistId === undefined || target.playlistId === null) return;
-    return publishPlaylist(target.playlistId, target.playlistName || "Untitled mixtape");
+    return publishPlaylist(target.playlistId);
   });
   api.network.onDeepLink(onDeepLink);
   registerSongCounts();
@@ -3836,14 +3272,11 @@ function activate(pluginApi) {
     })
     .then(function () {
       render();
-      // Fill the first tab shortly after launch rather than inside it:
-      // activation runs before the app is idle, and the view may never open.
+      // Refresh the module list shortly after launch rather than inside it:
+      // activation runs before the app is idle.
       firstLoadTimer = setTimeout(function () {
         firstLoadTimer = null;
-        if (!api) return;
-        loadModules().then(function () {
-          if (api && state.tab === MINE) switchTab(MINE);
-        });
+        if (api) loadModules();
       }, FIRST_LOAD_DELAY_MS);
     });
   return restored;
@@ -3873,9 +3306,7 @@ return {
   _cardRow: function (m, item) {
     return cardRow(m, item);
   },
-  _localRow: localRow,
   _mixtapeTracks: mixtapeTracks,
-  _playlistRow: playlistRow,
   _countsText: countsText,
   _countsTitleLine: countsTitleLine,
   _tabTree: tabTree,

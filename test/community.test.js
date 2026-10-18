@@ -72,6 +72,7 @@ async function setup(opts = {}) {
   if (opts.session) host.storage.set("session", opts.session);
   if (opts.ticks) host.storage.set("ticks", true);
   if (opts.syncLikes !== undefined) host.storage.set("syncLikes", opts.syncLikes);
+  if (opts.beforeActivate) opts.beforeActivate(host);
   await plugin.activate(host.api);
   return { plugin, host, log };
 }
@@ -92,15 +93,24 @@ test("a song row on an artist's tab opens the song's page on its Community tab",
   assert.deepEqual(host.requestedActions.at(-1), ["navigate-to-track", { name: "Jóga", artistName: "Björk" }]);
 });
 
-test("the view is You and Settings: browsing is the website's", async () => {
+test("no view of its own: a settings panel, and what you shared is on the website", async () => {
+  const manifest = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "manifest.json"), "utf8"));
+  assert.equal(manifest.contributes.sidebarItems, undefined, "no sidebar view");
+  assert.equal(manifest.viewHeader, undefined);
+  assert.equal(manifest.contributes.settingsPanel.id, "community-settings");
+
   const { host, log } = await setup({ session: SIGNED_IN });
   await flush();
-  const view = host.lastView();
-  assert.deepEqual(nodes(view, "tabs")[0].tabs.map((t) => t.label), ["You", "Settings"]);
-  assert.ok(nodes(view, "button").some((b) => b.label === "Browse Community" && b.action === "open-site"));
-  await host.actions["open-site"]();
-  assert.equal(host.opened.at(-1), "https://community.viboplr.com");
+  assert.ok(host.views.length > 0 && host.views.every((v) => v.id === "community-settings"), "only the settings panel is drawn");
+  const panel = host.lastView();
+  assert.deepEqual(nodes(panel, "section").map((s) => s.title), ["Account", "While you listen", "Send from Viboplr", "Share with Viboplr Community"]);
+  assert.ok(nodes(panel, "button").some((b) => b.label === "Open my page" && b.action === "open-my-page"));
+  await host.actions["open-my-page"]();
+  assert.equal(host.opened.at(-1), "https://community.viboplr.com/me");
+  assert.ok(!log.some(([, p]) => p.startsWith("/v1/me/items")), "what you shared isn't read: the website shows it");
   assert.ok(!log.some(([, p]) => p.startsWith("/v1/activity") || p.startsWith("/v1/subjects/search") || p.startsWith("/v1/items/search")), "nothing is browsed from here");
+  assert.equal(host.actions.tab, undefined);
+  assert.equal(host.actions["publish-queue"], undefined, "only saved playlists are published");
 });
 
 test("the song's Community tab: like, the cue sheets to import, and comments", async () => {
@@ -170,7 +180,6 @@ test("likes made in the app reach Community by default, as likes and un-likes, u
   const like = (over) => host.likeChanged({ kind: "track", name: "Jóga", artistName: "Björk", albumTitle: "Homogenic", albumArtistName: "Björk", liked: 1, previous: 0, ...over });
 
   // On by default: nothing stored yet still sends.
-  await host.actions.tab({ tabId: "settings" });
   const toggle = () => nodes(host.lastView(), "toggle").find((t) => t.action === "toggle-sync-likes");
   assert.equal(toggle().checked, true);
 
@@ -218,7 +227,6 @@ test("a play handed over is sent, with when it started, and reported as sent", a
   assert.deepEqual({ ...sent, playedAt: 0 }, { title: "Jóga", artistName: "Björk", albumName: "Homogenic", albumArtistName: "Björk", playedAt: 0 });
   assert.ok(Math.abs(sent.playedAt - (before - 152)) <= 1, "the play started 152 s before the threshold");
   assert.deepEqual(host.storage.get("playQueue"), [], "sent plays leave the queue");
-  await host.actions.tab({ tabId: "settings" });
   assert.match(JSON.stringify(nodes(host.lastView(), "text")), /All your plays are sent/);
   assert.ok(!nodes(host.lastView(), "toggle").some((n) => n.action === "toggle-scrobble"), "no switch of its own");
   // A song with no artist isn't a scrobble the server can take.
@@ -229,13 +237,11 @@ test("a play handed over is sent, with when it started, and reported as sent", a
 // An older Viboplr ignores `scrobbler.defaultEnabled` and would hand every
 // play over, so there the plugin's own opt-in switch still decides.
 test("on a Viboplr that doesn't own scrobbling, plays wait for the plugin's own switch", async () => {
-  const { host } = await setup({ session: SIGNED_IN });
-  delete host.api.playback.reportScrobble;
+  const { host } = await setup({ session: SIGNED_IN, beforeActivate: (h) => delete h.api.playback.reportScrobble });
   const posts = () => host.requests.filter((r) => r.url.endsWith("/v1/plays"));
   assert.equal(await host.trackScrobbled(PLAYED), undefined);
   await flush();
   assert.equal(posts().length, 0, "off until switched on");
-  await host.actions.tab({ tabId: "settings" });
   assert.ok(nodes(host.lastView(), "toggle").some((n) => n.action === "toggle-scrobble"), "the switch is shown");
   await host.actions["toggle-scrobble"]({ value: true });
   assert.equal(host.storage.get("scrobble"), true);
@@ -263,7 +269,6 @@ test("plays made while Community is unreachable wait, survive a restart, and go 
     assert.equal(report.status, "queued");
     assert.equal(report.pending, 2);
     assert.match(report.message, /Couldn't reach Viboplr Community/);
-    await host.actions.tab({ tabId: "settings" });
     assert.match(JSON.stringify(nodes(host.lastView(), "text")), /2 plays waiting to be sent/);
 
     // The app restarts with the server back: the queue goes out on its own.
@@ -303,23 +308,15 @@ test("plays the server refuses or too old to send are dropped, and the app is to
   }
 });
 
-test("the switches live on Settings, which links to the plugin's Extensions page on a host that opens it", async () => {
-  const toggles = (host) => nodes(host.lastView(), "toggle").map((t) => t.action);
-  const extButton = (host) => nodes(host.lastView(), "button").find((b) => b.action === "open-extension-settings");
-
-  const old = await setup({ session: SIGNED_IN });
-  await old.host.actions.tab({ tabId: "you" });
-  assert.ok(!toggles(old.host).includes("toggle-sync-likes"), "You holds no switches");
-  await old.host.actions.tab({ tabId: "settings" });
-  assert.ok(toggles(old.host).includes("toggle-sync-likes"));
-  assert.ok(toggles(old.host).includes("toggle-ticks"));
-  assert.equal(extButton(old.host), undefined, "an older host can't open the page, so no button");
-
+test("the settings panel holds the account and every switch", async () => {
   const { host } = await setup({ session: SIGNED_IN, appVersion: "1.0.103" });
-  await host.actions.tab({ tabId: "settings" });
-  assert.ok(extButton(host));
-  await host.actions["open-extension-settings"]();
-  assert.deepEqual(host.requestedActions.at(-1), ["open-extension-settings", {}]);
+  const toggles = nodes(host.lastView(), "toggle").map((t) => t.action);
+  assert.ok(toggles.includes("toggle-sync-likes"));
+  assert.ok(toggles.includes("toggle-ticks"));
+  const rows = nodes(host.lastView(), "settings-row");
+  assert.ok(rows.some((r) => r.label === "Signed in as @alice" && r.control.action === "sign-out"));
+  // It is the Extensions page already: no button to open it.
+  assert.ok(!nodes(host.lastView(), "button").some((b) => b.action === "open-extension-settings"));
 });
 
 test("a saved switch-off survives a restart: likes stay in the app", async () => {
@@ -327,14 +324,12 @@ test("a saved switch-off survives a restart: likes stay in the app", async () =>
   await host.likeChanged({ kind: "artist", name: "Björk", artistName: null, albumTitle: null, albumArtistName: null, liked: 1, previous: 0 });
   await flush();
   assert.ok(!log.some(([, p]) => p === "/v1/likes"));
-  await host.actions.tab({ tabId: "settings" });
   assert.equal(nodes(host.lastView(), "toggle").find((t) => t.action === "toggle-sync-likes").checked, false);
 });
 
 test("signed out, likes stay in the app and the switch can't be turned on", async () => {
   const { host, log } = await setup();
   host.storage.set("syncLikes", true);
-  await host.actions.tab({ tabId: "settings" });
   await host.actions["toggle-sync-likes"]({ value: true });
   const toggle = nodes(host.lastView(), "toggle").find((t) => t.action === "toggle-sync-likes");
   assert.equal(toggle.disabled, true);
@@ -357,7 +352,6 @@ test("seek-bar ticks are off until switched on, then show the playing song's tim
   host.trackStarted(track);
   await flush();
   assert.equal(log.filter(([, p]) => p.includes("/comments")).length, 0, "nothing asked while off");
-  await host.actions.tab({ tabId: "settings" });
   const toggle = nodes(host.lastView(), "toggle").find((t) => t.action === "toggle-ticks");
   assert.equal(toggle.checked, false);
   await host.actions["toggle-ticks"]({ value: true });
@@ -482,11 +476,29 @@ test("importing lyrics from the tab over the song's own synced lyrics asks first
   const ask = nodes(host.sectionData.at(-1).data, "confirm")[0];
   assert.ok(ask, "the tab asks");
   assert.equal(ask.confirmAction, "tab-confirm-replace-lyrics");
-  assert.match(ask.message, /Community → You/);
+  assert.match(ask.message, /Undo lyrics import on the song's Community tab/);
 
   await host.actions[ask.confirmAction]({ ...ask.data, entity: joga });
   assert.equal(host.lyricsSaves.at(-1).lyrics.text, "[00:01.00]theirs");
   assert.equal(nodes(host.sectionData.at(-1).data, "confirm").length, 0, "the question is gone");
+
+  // The tab now offers Undo, which hands the song back to the providers.
+  const undo = () => nodes(host.sectionData.at(-1).data, "button").find((b) => b.action === "tab-undo-lyrics");
+  assert.ok(undo(), "Undo lyrics import shows once imported");
+  host.webLyrics.set("track:bjork:joga", { text: "[00:01.00]mine", kind: "synced" });
+  await host.actions["tab-undo-lyrics"]({ entity: joga });
+  assert.equal(host.infoFetches.at(-1).opts.force, true, "re-walks the chain");
+  assert.equal(host.lyricsCache.get("track:bjork:joga").text, "[00:01.00]mine");
+  assert.equal(undo(), undefined, "nothing left to undo");
+
+  // Imported from the website's "Open in Vibo" instead: the open tab follows.
+  await host.deepLink("viboplr://plugin/community/open?id=lyr1");
+  await flush(10);
+  await host.actions["answer-open"]();
+  await host.actions["answer-replace"]();
+  await flush(10);
+  assert.equal(host.lyricsSaves.at(-1).lyrics.text, "[00:01.00]theirs");
+  assert.ok(undo(), "the tab was redrawn with Undo");
 });
 
 test("switching the ticks off while they load leaves the bar clear", async () => {

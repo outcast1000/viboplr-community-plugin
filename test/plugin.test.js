@@ -39,6 +39,27 @@ async function setup(route, opts = {}) {
   return { plugin, host };
 }
 
+// The settings panel's Account section, as the user reads it: "Signed out",
+// "Signing in…" (a sign-in on its way) or the signed-in login ("@alice").
+function accountState(host) {
+  const section = nodes(host.lastView(), "section").find((s) => s.title === "Account");
+  const rows = nodes({ children: section.children }, "settings-row");
+  if (rows.some((r) => r.label === "Signed out")) return "Signed out";
+  const me = rows.find((r) => /^Signed in as /.test(r.label));
+  return me ? me.label.replace("Signed in as ", "") : "Signing in…";
+}
+
+// A share link's notice, if it asked (null otherwise).
+const asked = (host, id) => host.notices.filter((n) => n.options && n.options.action && n.options.action.id === id).at(-1) || null;
+
+// The website's "Open in Vibo" for item `id`, answered with the notice's button.
+async function openAndAnswer(host, id) {
+  await host.deepLink("viboplr://plugin/community/open?id=" + id);
+  for (let i = 0; i < 10; i++) await flush();
+  assert.ok(asked(host, "answer-open"), "the link asks in a notice");
+  await host.actions["answer-open"]();
+}
+
 test("song keys fold case and accents like the app's entity keys", () => {
   const p = loadPlugin();
   assert.equal(p._songKey(" Jóga ", "Björk"), "track:bjork:joga");
@@ -55,14 +76,16 @@ test("base64url matches RFC 4648 and parseLink reads scoped links only", () => {
   assert.equal(p._parseLink("viboplr://plugin/other/auth?code=x"), null);
 });
 
-test("signed out, the header offers the browser sign-in first and a code second", async () => {
+test("signed out, the settings panel offers the browser sign-in first and a code second", async () => {
   const { host } = await setup(() => undefined);
-  const actions = host.lastHeader().actions;
+  assert.equal(accountState(host), "Signed out");
+  const section = nodes(host.lastView(), "section").find((s) => s.title === "Account");
+  const buttons = nodes({ children: section.children }, "button");
   assert.deepEqual(
-    actions.map((a) => [a.action, a.variant]),
+    buttons.map((b) => [b.action, b.variant]),
     [["sign-in", "accent"], ["sign-in-code", "secondary"], ["open-site", "secondary"]]
   );
-  assert.equal(actions[1].label, "Sign in with a code");
+  assert.equal(buttons[1].label, "Sign in with a code");
 });
 
 test("sign-in: PKCE challenge in the browser link, verifier only in the exchange", async () => {
@@ -81,7 +104,7 @@ test("sign-in: PKCE challenge in the browser link, verifier only in the exchange
   assert.equal(start.searchParams.get("client"), "app");
   assert.equal(start.searchParams.get("code_challenge_method"), "S256");
   const st = start.searchParams.get("state");
-  assert.equal(host.lastHeader().status.label, "Signing in…");
+  assert.equal(accountState(host), "Signing in…");
   // While it waits, the code sign-in is one click away.
   assert.ok(nodes(host.lastView(), "button").some((b) => b.action === "sign-in-code" && b.label === "Use a code instead"));
 
@@ -98,7 +121,7 @@ test("sign-in: PKCE challenge in the browser link, verifier only in the exchange
   assert.equal(challenge, start.searchParams.get("code_challenge"));
   assert.ok(!host.opened[0].includes(verifier), "the verifier never goes to the browser");
   assert.deepEqual(host.storage.get("session"), { token: "vcom_tok", user: { login: "alice" } });
-  assert.equal(host.lastHeader().status.label, "@alice");
+  assert.equal(accountState(host), "@alice");
 });
 
 test("a cancelled sign-in clears the waiting state", async () => {
@@ -106,7 +129,7 @@ test("a cancelled sign-in clears the waiting state", async () => {
   await host.actions["sign-in"]();
   const st = new URL(host.opened[0]).searchParams.get("state");
   await host.deepLink(`viboplr://plugin/community/auth?error=cancelled&state=${st}`);
-  assert.equal(host.lastHeader().status.label, "Signed out");
+  assert.equal(accountState(host), "Signed out");
   assert.match(host.lastNotice().message, /cancelled/);
 });
 
@@ -147,7 +170,7 @@ test("sign-in: the browser confirms a code, the plugin polls until it's a sessio
   const { host } = await setup(deviceRoute([PENDING, PENDING, token], polls));
   await host.actions["sign-in-code"]();
   assert.deepEqual(host.opened, [DEVICE.verificationUriComplete]);
-  assert.equal(host.lastHeader().status.label, "Signing in…");
+  assert.equal(accountState(host), "Signing in…");
   // The code is on screen too, for a browser that didn't open.
   const banner = nodes(host.lastView(), "text").find((n) => n.content.includes("BCDF-GHJK"));
   assert.match(banner.content, /community\.viboplr\.com\/device/);
@@ -158,7 +181,7 @@ test("sign-in: the browser confirms a code, the plugin polls until it's a sessio
   assert.ok(polls.every((p) => p.deviceCode === "device-secret"));
   assert.ok(!host.opened.some((u) => u.includes("device-secret")), "the device code never goes to the browser");
   assert.deepEqual(host.storage.get("session"), { token: "vcom_tok", user: { login: "alice" } });
-  assert.equal(host.lastHeader().status.label, "@alice");
+  assert.equal(accountState(host), "@alice");
   assert.match(host.lastNotice().message, /Signed in .* as @alice/);
   await until(() => false);
   assert.equal(polls.length, 3, "no polling once signed in");
@@ -183,7 +206,7 @@ test("cancelling a sign-in stops asking", async () => {
   const asked = polls.length;
   await until(() => false);
   assert.ok(polls.length <= asked + 1, "at most the poll already in flight");
-  assert.equal(host.lastHeader().status.label, "Signed out");
+  assert.equal(accountState(host), "Signed out");
   assert.equal(host.storage.get("session"), undefined);
 });
 
@@ -191,7 +214,7 @@ test("an expired code ends the sign-in and says so", async () => {
   const polls = [];
   const { host } = await setup(deviceRoute([PENDING, { status: 400, body: { error: "expired_token" } }], polls));
   await host.actions["sign-in-code"]();
-  assert.ok(await until(() => host.lastHeader().status.label === "Signed out"));
+  assert.ok(await until(() => accountState(host) === "Signed out"));
   assert.equal(polls.length, 2);
   assert.match(host.lastNotice().message, /expired/);
 });
@@ -200,7 +223,7 @@ test("a refused sign-in stops with the server's reason", async () => {
   const polls = [];
   const { host } = await setup(deviceRoute([PENDING, { status: 403, body: { error: "This account is suspended." } }], polls));
   await host.actions["sign-in-code"]();
-  assert.ok(await until(() => host.lastHeader().status.label === "Signed out"));
+  assert.ok(await until(() => accountState(host) === "Signed out"));
   assert.match(host.lastNotice().message, /Couldn't finish signing in: This account is suspended\./);
   await until(() => false);
   assert.equal(polls.length, 2);
@@ -253,7 +276,7 @@ test("import installs the sheet through api.cues and remembers where it came fro
     if (u.pathname === "/v1/items/abc123/imported") counted.push(1);
     return { status: 204 };
   });
-  await host.actions.import({ itemId: "abc123" });
+  await openAndAnswer(host, "abc123");
   const row = await host.api.cues.get("Jóga", "Björk");
   assert.deepEqual(row.sheet, SHEET);
   assert.equal(row.author, "Claude · via @alice");
@@ -270,12 +293,19 @@ test("import asks before replacing a sheet the user already has", async () => {
     return { status: 204 };
   });
   await host.addSheet("joga", "bjork", { cues: [{ at: 1, text: "mine" }] });
-  await host.actions.import({ itemId: "abc123" });
-  const confirm = nodes(host.lastView(), "confirm")[0];
-  assert.equal(confirm.confirmAction, "confirm-replace");
+  await openAndAnswer(host, "abc123");
+  const ask = asked(host, "answer-replace");
+  assert.match(ask.message, /^Replace your cue sheet\? You already have a cue sheet for “Jóga” by Björk\. Importing @alice's replaces it\.$/);
+  assert.equal(ask.options.action.label, "Replace");
+  assert.equal(ask.options.kind, "warning");
   assert.equal((await host.api.cues.get("Jóga", "Björk")).sheet.cues[0].text, "mine", "nothing replaced yet");
-  await host.actions["confirm-replace"](confirm.data);
+  // A leftover Import button can't be what replaces it: that's its own button.
+  await host.actions["answer-open"]();
+  assert.equal((await host.api.cues.get("Jóga", "Björk")).sheet.cues[0].text, "mine");
+  await host.actions["answer-replace"]();
   assert.equal((await host.api.cues.get("Jóga", "Björk")).sheet.cues[0].text, "hi");
+  await host.actions["answer-replace"]();
+  assert.match(host.lastNotice().message, /already answered/);
 });
 
 test("publish sends the local sheet with the bearer token", async () => {
@@ -316,7 +346,7 @@ test("publishing needs a sign-in and refuses an untouched import", async () => {
     },
     { session: { token: "vcom_tok", user: { login: "bob" } } }
   );
-  await signedIn.actions.import({ itemId: "abc123" });
+  await openAndAnswer(signedIn, "abc123");
   const before = signedIn.requests.length;
   await signedIn.menu["publish-cues"]({ kind: "track", title: "Jóga", artistName: "Björk" });
   assert.equal(signedIn.requests.length, before, "no request sent");
@@ -333,22 +363,20 @@ test("a 401 signs the plugin out instead of failing silently", async () => {
   await host.addSheet("Song", "Band", SHEET);
   await host.menu["publish-cues"]({ kind: "track", title: "Song", artistName: "Band" });
   assert.equal(host.storage.get("session"), null);
-  assert.equal(host.lastHeader().status.label, "Signed out");
+  assert.equal(accountState(host), "Signed out");
   assert.match(host.lastNotice().message, /sign in again/i);
 });
 
-test("an unreachable server is a banner in the view, not a toast", async () => {
+test("an unreachable server says so when a share link is opened", async () => {
   const { host } = await setup(
     () => {
       throw new Error("connection refused");
     },
     { session: { token: "vcom_tok", user: { login: "alice" } } }
   );
-  await host.actions.tab({ tabId: "you" });
-  const banners = nodes(host.lastView(), "layout").filter((n) => /ds-banner/.test(n.className || ""));
-  assert.equal(banners.length, 1);
-  assert.match(banners[0].children[0].content, /connection refused/);
-  assert.equal(host.notices.length, 0);
+  await host.deepLink("viboplr://plugin/community/open?id=abc123");
+  for (let i = 0; i < 5; i++) await flush();
+  assert.match(host.lastNotice().message, /Couldn't open that link: connection refused/);
 });
 
 test("a proxy's web page instead of JSON is named as such, and requests identify themselves", async () => {
@@ -359,20 +387,11 @@ test("a proxy's web page instead of JSON is named as such, and requests identify
     return { status: 200, headers: {}, text: async () => "<!doctype html><title>Browser Isolation</title>" };
   };
   host.requests.length = 0;
-  await host.actions.tab({ tabId: "you" });
-  const banners = nodes(host.lastView(), "layout").filter((n) => /ds-banner/.test(n.className || ""));
-  assert.match(banners[0].children[0].content, /proxy or filter on your network/);
+  await host.deepLink("viboplr://plugin/community/open?id=abc123");
+  for (let i = 0; i < 5; i++) await flush();
+  assert.match(host.lastNotice().message, /proxy or filter on your network/);
   assert.match(host.requests[0].init.headers["User-Agent"], /^Viboplr-Community-Plugin\//);
   assert.ok(host.logs.some((l) => l.level === "warn" && /Browser Isolation/.test(l.message)));
-});
-
-test("Mine marks published, imported and own sheets differently", async () => {
-  const p = loadPlugin();
-  const sheet = { title: "Song", artistName: "Band", sheet: SHEET, updatedAt: 5, author: "Claude" };
-  assert.deepEqual(p._localRow(sheet, null, null).actions, ["publish"]);
-  assert.equal(p._localRow(sheet, { id: "x" }, null).badge.label, "Published");
-  assert.deepEqual(p._localRow(sheet, null, { id: "x", updatedAt: 5 }).actions, []);
-  assert.deepEqual(p._localRow(sheet, null, { id: "x", updatedAt: 4 }).actions, ["publish"], "changed since import");
 });
 
 test("a cue sheet row says when an imported sheet has an update", async () => {
@@ -385,16 +404,20 @@ test("a cue sheet row says when an imported sheet has an update", async () => {
   assert.equal(plugin._cardRow(cue, { ...ITEM, id: "other" }).badge, undefined);
 });
 
-test("a share link opens You and asks to import", async () => {
+test("a share link asks to import in a notice, whose button imports", async () => {
   const { host } = await setup((u) => {
     if (u.pathname === "/v1/items/abc123") return { body: { item: { ...ITEM, payload: SHEET } } };
+    return { status: 204 };
   });
   await host.deepLink("viboplr://plugin/community/open?id=abc123");
   for (let i = 0; i < 5; i++) await flush();
-  assert.deepEqual(host.navigated, ["community"]);
-  const view = host.lastView();
-  assert.equal(nodes(view, "tabs")[0].activeTab, "you");
-  assert.equal(nodes(view, "confirm")[0].confirmAction, "confirm-import");
+  assert.deepEqual(host.navigated, [], "no view to open");
+  const ask = asked(host, "answer-open");
+  assert.equal(ask.message, "Import this cue sheet? @alice's cue sheet for “Jóga” by Björk will play over that song in Now Playing.");
+  assert.equal(ask.options.action.label, "Import");
+  assert.equal(await host.api.cues.get("Jóga", "Björk"), null, "nothing until the button");
+  await host.actions["answer-open"]();
+  assert.deepEqual((await host.api.cues.get("Jóga", "Björk")).sheet, SHEET);
 });
 
 const SERVER_ITEM = {
@@ -427,34 +450,7 @@ test("a share link to something the app can't take in (a Subsonic server) opens 
   assert.equal(host.addRequests.length, 0, "the website's Add opens the app's dialog itself");
 });
 
-test("tabs are You and Settings, and You has a section per module", async () => {
-  const { host } = await setup(
-    (u) => {
-      if (u.pathname === "/v1/me/items") {
-        return { body: { items: [{ ...ITEM, kind: "cue_sheet" }, SERVER_ITEM] } };
-      }
-    },
-    { session: { token: "vcom_tok", user: { login: "alice" } } }
-  );
-  await host.addSheet("Jóga", "Björk", SHEET);
-  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["you", "settings"]);
-
-  await host.actions.tab({ tabId: "you" });
-  const sections = nodes(host.lastView(), "section");
-  // Cue sheets and mixtapes bring their own sections (what's on this computer); servers use the generic one.
-  assert.deepEqual(sections.map((n) => n.title), ["Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your Subsonic servers"]);
-  const [sheets, , , servers] = sections.map((n) => nodes({ children: n.children }, "track-row-list")[0]);
-  assert.equal(sheets.items[0].badge.label, "Published", "matched against your cue sheets online");
-  assert.equal(servers.items[0].title, "Jazz box");
-  assert.deepEqual(servers.items[0].actions, ["page", "edit"]);
-
-  await host.actions.edit({ itemId: "srv1" });
-  assert.equal(host.opened.at(-1), "https://community.viboplr.com/servers/srv1/edit");
-  await host.actions.share({ kind: "subsonic_server" });
-  assert.equal(host.opened.at(-1), "https://community.viboplr.com/servers/new");
-});
-
-test("a module the plugin has never heard of still gets a working section on You", async () => {
+test("a module the plugin has never heard of is still named in the counts", async () => {
   const PRESET = {
     id: "eq1",
     kind: "eq_preset",
@@ -485,18 +481,11 @@ test("a module the plugin has never heard of still gets a working section on You
     { session: { token: "vcom_tok", user: { login: "bob" } } }
   );
   await plugin._loadModules();
-  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.label), ["You", "Settings"]);
   assert.ok(host.storage.get("modules").some((m) => m.kind === "eq_preset"), "remembered for the next start");
-
-  await host.actions.tab({ tabId: "you" });
-  const sections = nodes(host.lastView(), "section");
-  const titles = sections.map((n) => n.title);
-  assert.deepEqual(titles, ["Cue sheets on this computer", "Synced lyrics", "Your playlists", "Your Subsonic servers", "Your eq presets"]); // eq: no `plural`, so the lowercased name
-  const list = nodes({ children: sections.at(-1).children }, "track-row-list")[0];
-  assert.deepEqual(list.actions, [{ id: "page", label: "Open page", icon: "↗" }]);
-  assert.deepEqual(list.items[0], { id: "eq1", title: "HD 600", subtitle: "10 bands · @bob · 1 use", actions: ["page"] });
-  await host.actions.page({ itemId: "eq1" });
-  assert.equal(host.opened.at(-1), "https://community.viboplr.com/eq-presets/eq1");
+  // No `plural`, so the lowercased name.
+  assert.equal(plugin._countsText({ cue_sheet: 1, eq_preset: 2 }), "Community: 1 cue sheet · 2 eq presets");
+  const row = plugin._cardRow(plugin._state().modules.find((m) => m.kind === "eq_preset"), PRESET);
+  assert.deepEqual(row, { id: "eq1", title: "HD 600", subtitle: "10 bands · @bob · 1 use", actions: ["page"] });
 });
 
 // The built-in module descriptions as the server would send them.
@@ -509,7 +498,6 @@ test("a bad module list from the server is ignored, not fatal", async () => {
     if (u.pathname === "/v1/modules") return { body: { modules: [{ kind: 3 }, null, { name: "no kind" }] } };
   });
   await plugin._loadModules();
-  assert.deepEqual(nodes(host.lastView(), "tabs")[0].tabs.map((t) => t.id), ["you", "settings"]);
   assert.deepEqual(plugin._state().modules.map((m) => m.kind), plugin._builtinModules.map((m) => m.kind), "the built-in list stays");
 });
 
@@ -583,34 +571,30 @@ test("publishing a playlist sends its track list and never a file path", async (
   assert.ok(!JSON.stringify(posted).includes("file://"));
   assert.match(host.lastNotice().message, /Published “Sunday”/);
 
-  // Mine now shows it as published, with the online actions.
-  await host.actions.tab({ tabId: "you" });
-  const section = nodes(host.lastView(), "section").find((s) => s.title === "Your playlists");
-  const row = nodes({ children: section.children }, "track-row-list")[0].items[0];
-  assert.equal(row.badge.label, "Published");
-  assert.deepEqual(row.actions, ["republish-playlist", "unpublish-mixtape", "mixtape-page"]);
+  // Publishing it again updates it.
+  await host.menu["publish-mixtape"]({ kind: "playlist", playlistId: id, playlistName: "Sunday" });
+  assert.equal(posted.length, 2);
 });
 
-test("publishing needs a sign-in, and the queue publishes under the name you give it", async () => {
+test("publishing a playlist needs a sign-in, and only a playlist you saved is published", async () => {
   const posted = [];
-  const queue = [{ key: "q:1", path: "file:///Users/me/a.mp3", title: "Naima", artist_name: "John Coltrane", album_title: null, duration_secs: 261 }];
-  const signedOut = await setup(mixRoute(posted), { queue });
-  await signedOut.host.actions["publish-queue"]({ query: "Tonight" });
+  const signedOut = await setup(mixRoute(posted));
+  const sunday = await signedOut.host.addPlaylist("Sunday", MIX_TRACKS);
+  await signedOut.host.menu["publish-mixtape"]({ kind: "playlist", playlistId: sunday, playlistName: "Sunday" });
   assert.equal(posted.length, 0);
-  assert.match(signedOut.host.lastNotice().message, /Sign in/);
+  assert.equal(signedOut.host.lastNotice().options.action.id, "sign-in");
 
-  const { host } = await setup(mixRoute(posted), { queue, session: { token: "vcom_tok", user: { login: "alice" } } });
-  await host.actions["publish-queue"]({ query: "  " });
-  assert.equal(posted.length, 0, "a name is required");
-  await host.actions["publish-queue"]({ query: "Tonight" });
-  assert.equal(posted[0].title, "Tonight");
-  assert.deepEqual(posted[0].tracks, [{ title: "Naima", artistName: "John Coltrane", albumName: null, durationSecs: 261 }]);
+  const { host } = await setup(mixRoute(posted), { session: { token: "vcom_tok", user: { login: "alice" } } });
+  assert.equal(host.actions["publish-queue"], undefined, "the queue isn't published");
+  await host.menu["publish-mixtape"]({ kind: "playlist", playlistId: 99, playlistName: "Ghost" });
+  assert.equal(posted.length, 0, "a playlist that isn't saved");
+  assert.match(host.lastNotice().message, /Couldn't find that playlist/);
 });
 
 test("Save remembers where the mixtape came from, and a newer version replaces the saved copy", async () => {
   const at = { version: 1 };
   const { host } = await setup(mixRoute([], at));
-  const save = () => host.actions["confirm-save-mixtape"]({ id: "mx1" });
+  const save = () => openAndAnswer(host, "mx1");
 
   await save();
   const [saved] = host.playlists.values();
@@ -633,49 +617,51 @@ test("Save remembers where the mixtape came from, and a newer version replaces t
   assert.match(host.lastNotice().message, /Updated “Late night”/);
 });
 
-test("Mine offers your own playlists, never Liked/Disliked or the app's mixes", async () => {
+test("Liked/Disliked and the app's mixes are never published", async () => {
   const posted = [];
   const { host } = await setup(mixRoute(posted), { session: { token: "vcom_tok", user: { login: "alice" } } });
-  await host.addPlaylist("Sunday", MIX_TRACKS);
-  await host.addPlaylist("Liked Tracks", MIX_TRACKS);
-  await host.addPlaylist("Disliked Tracks", MIX_TRACKS);
-  await host.addPlaylist("Kyuss Mix", MIX_TRACKS, { metadata: { recipe: "daily-mix", first_artist: "Kyuss" } });
-  await host.addPlaylist("Nothing yet", []);
-  // Even one already published stays out: it's still not the user's own list.
-  posted.push({ title: "Kyuss Mix" });
-  await host.actions.tab({ tabId: "you" });
-  const section = nodes(host.lastView(), "section").find((s) => s.title === "Your playlists");
-  const rows = nodes({ children: section.children }, "track-row-list")[0].items;
-  assert.deepEqual(rows.map((r) => r.title), ["Sunday"]);
+  for (const [name, extra] of [
+    ["Liked Tracks", {}],
+    ["Disliked Tracks", {}],
+    ["Kyuss Mix", { metadata: { recipe: "daily-mix", first_artist: "Kyuss" } }],
+  ]) {
+    const id = await host.addPlaylist(name, MIX_TRACKS, extra);
+    await host.menu["publish-mixtape"]({ kind: "playlist", playlistId: id, playlistName: name });
+    assert.match(host.lastNotice().message, new RegExp("“" + name + "” is made by Viboplr, so it can't be published"));
+  }
+  assert.equal(posted.length, 0);
 });
 
 test("a saved community mixtape isn't yours to publish", async () => {
   const posted = [];
   const { host } = await setup(mixRoute(posted), { session: { token: "vcom_tok", user: { login: "alice" } } });
   const id = await host.addPlaylist("Late night", MIX_TRACKS, { metadata: { communityId: "mx1", communityVersion: 1, communityBy: "bob" } });
-  await host.actions.tab({ tabId: "you" });
-  const section = nodes(host.lastView(), "section").find((s) => s.title === "Your playlists");
-  const row = nodes({ children: section.children }, "track-row-list")[0].items[0];
-  assert.equal(row.badge.label, "From the community");
-  assert.deepEqual(row.actions, []);
-  assert.equal(row.subtitle, "2 tracks · by @bob");
   await host.menu["publish-mixtape"]({ kind: "playlist", playlistId: id, playlistName: "Late night" });
   assert.equal(posted.length, 0);
   assert.match(host.lastNotice().message, /isn't yours to publish/);
 });
 
-test("a mixtape share link opens You and asks to save", async () => {
+test("a mixtape share link asks to save in a notice", async () => {
   const { host } = await setup(mixRoute([]));
   await host.deepLink("viboplr://plugin/community/open?id=mx1");
   for (let i = 0; i < 10; i++) await flush();
-  assert.deepEqual(host.navigated, ["community"]);
-  const view = host.lastView();
-  assert.equal(nodes(view, "tabs")[0].activeTab, "you");
-  const confirm = nodes(view, "confirm")[0];
-  assert.equal(confirm.confirmAction, "confirm-save-mixtape");
-  assert.match(confirm.message, /@bob's mixtape “Late night” \(2 tracks\)/);
-  await host.actions["confirm-save-mixtape"](confirm.data);
+  assert.deepEqual(host.navigated, []);
+  const ask = asked(host, "answer-open");
+  assert.equal(ask.message, "Save this mixtape? @bob's mixtape “Late night” (2 tracks) will be added to your Playlists.");
+  assert.equal(ask.options.action.label, "Save to Playlists");
+  assert.equal(host.playlists.size, 0);
+  await host.actions["answer-open"]();
   assert.equal(host.playlists.size, 1);
+});
+
+test("a saved mixtape deleted in the app can be saved again", async () => {
+  const { host } = await setup(mixRoute([]));
+  await openAndAnswer(host, "mx1");
+  const [saved] = host.playlists.values();
+  await host.api.playlists.delete(saved.id);
+  await openAndAnswer(host, "mx1");
+  assert.equal(host.playlists.size, 1, "the playlists are read again, not remembered");
+  assert.match(host.lastNotice().message, /Saved “Late night”/);
 });
 
 // ---- synced lyrics ------------------------------------------------------------
@@ -734,7 +720,7 @@ const lyricsRow = (plugin, item) => plugin._cardRow(plugin._builtinModules.find(
 test("Import makes the shared lyrics the song's lyrics through api.lyrics.save", async () => {
   const { plugin, host } = await setup(lyricsRoute([]));
   host.webLyrics.set(JOGA_KEY, { text: "plain words", kind: "plain" });
-  await host.actions["import-lyrics"]({ itemId: "ly1" });
+  await openAndAnswer(host, "ly1");
   assert.deepEqual(host.lyricsSaves.map((s) => s.track), [{ title: "Jóga", artistName: "Björk", albumTitle: "Homogenic" }]);
   assert.equal(host.lyricsSaves[0].lyrics.kind, "synced");
   assert.match(host.lyricsCache.get(JOGA_KEY).text, /Three v1/);
@@ -749,7 +735,7 @@ test("Import makes the shared lyrics the song's lyrics through api.lyrics.save",
 test("Import says which Viboplr it needs when the host can't save lyrics", async () => {
   const { host } = await setup(lyricsRoute([]));
   delete host.api.lyrics;
-  await host.actions["import-lyrics"]({ itemId: "ly1" });
+  await openAndAnswer(host, "ly1");
   assert.match(host.lastNotice().message, /1\.0\.94/);
   assert.equal(host.lyricsCache.size, 0);
 });
@@ -757,24 +743,20 @@ test("Import says which Viboplr it needs when the host can't save lyrics", async
 test("Import asks first when the song already has synced lyrics, and says where from", async () => {
   const { host } = await setup(lyricsRoute([]));
   host.webLyrics.set(JOGA_KEY, { text: "[00:01.00]theirs", kind: "synced", _meta: { providerName: "LRCLIB" } });
-  await host.actions["import-lyrics"]({ itemId: "ly1" });
-  const confirm = nodes(host.lastView(), "confirm")[0];
-  assert.equal(confirm.confirmAction, "confirm-replace-lyrics");
-  assert.match(confirm.message, /from LRCLIB/);
+  await openAndAnswer(host, "ly1");
+  const ask = asked(host, "answer-replace");
+  assert.match(ask.message, /^Use these synced lyrics instead\? “Jóga” by Björk already has synced lyrics \(from LRCLIB\)/);
   assert.equal(host.lyricsSaves.length, 0, "nothing changed yet");
-  await host.actions["confirm-replace-lyrics"](confirm.data);
+  await host.actions["answer-replace"]();
   assert.match(host.lyricsCache.get(JOGA_KEY).text, /Three v1/);
 });
 
-test("Undo hands the song back to the user's providers", async () => {
+test("Undo on the song's Community tab hands the song back to the user's providers", async () => {
   const { plugin, host } = await setup(lyricsRoute([]));
-  await host.actions["import-lyrics"]({ itemId: "ly1" });
+  await openAndAnswer(host, "ly1");
   host.webLyrics.set(JOGA_KEY, { text: "plain words", kind: "plain" });
-  await host.actions.tab({ tabId: "you" });
-  const section = nodes(host.lastView(), "section").find((s) => s.title === "Synced lyrics");
-  const row = nodes({ children: section.children }, "track-row-list")[0].items[0];
-  assert.equal(row.badge.label, "Imported");
-  await host.actions["remove-lyrics"]({ itemId: row.id });
+  assert.equal(lyricsRow(plugin, LYRICS_ITEM).badge.label, "Imported");
+  await host.actions["tab-undo-lyrics"]({ entity: { kind: "track", name: "Jóga", artistName: "Björk" } });
   assert.equal(host.infoFetches.at(-1).opts.force, true, "re-walks the chain");
   assert.equal(host.lyricsCache.get(JOGA_KEY).text, "plain words");
   assert.deepEqual(lyricsRow(plugin, LYRICS_ITEM).actions, ["import-lyrics", "page"], "importable again");
@@ -783,12 +765,13 @@ test("Undo hands the song back to the user's providers", async () => {
 test("a newer version offers Update, and Update saves the new text without asking", async () => {
   const at = { version: 1 };
   const { plugin, host } = await setup(lyricsRoute([], at));
-  await host.actions["import-lyrics"]({ itemId: "ly1" });
+  await openAndAnswer(host, "ly1");
   at.version = 2;
   const row = lyricsRow(plugin, { ...LYRICS_ITEM, version: 2 });
   assert.equal(row.badge.label, "Update");
-  await host.actions["update-lyrics"]({ itemId: "ly1" });
-  assert.equal(nodes(host.lastView(), "confirm").length, 0);
+  await host.actions["tab-update-lyrics"]({ itemId: "ly1", entity: { kind: "track", name: "Jóga", artistName: "Björk" } });
+  assert.equal(asked(host, "answer-replace"), null, "no question");
+  assert.equal(nodes(host.sectionData.at(-1).data, "confirm").length, 0);
   assert.match(host.lyricsCache.get(JOGA_KEY).text, /Three v2/);
 });
 
@@ -867,9 +850,7 @@ test("Show on Community opens the song's own page on its Community tab; a share 
 
   await host.deepLink("viboplr://plugin/community/open?id=ly1");
   for (let i = 0; i < 10; i++) await flush();
-  const confirm = nodes(host.lastView(), "confirm")[0];
-  assert.equal(confirm.confirmAction, "confirm-import-lyrics");
-  assert.match(confirm.message, /@bob's synced lyrics for “Jóga” by Björk/);
+  assert.equal(asked(host, "answer-open").message, "Import these synced lyrics? @bob's synced lyrics for “Jóga” by Björk will scroll along in Now Playing.");
 });
 
 // ---------------------------------------------------------------------------

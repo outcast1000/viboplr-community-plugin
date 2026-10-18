@@ -136,7 +136,8 @@ const ARMY = { key: "q:2", title: "Army of Me", artist_name: "Björk", album_tit
 const HUNTER = { key: "q:3", title: "Hunter", artist_name: "Björk", album_title: "Homogenic", duration_secs: 255, path: "file:///m/hunter.flac", format: "flac" };
 const asked = (host) => Object.keys(host.storage.get("cueAsked") || {});
 const offers = (host) => host.notices.filter((n) => /cue sheet.* is shared/.test(n.message));
-const confirmed = (host) => host.views.some((v) => /Replace your cue sheet\?/.test(JSON.stringify(v.data)));
+// A "Replace yours?" question is a notice with a Replace button.
+const confirmed = (host) => host.notices.some((n) => /Replace your cue sheet\?/.test(n.message) || (n.options && n.options.action && n.options.action.id === "answer-replace"));
 
 test("a lookup that failed doesn't count as asked: the next look asks again", async () => {
   const server = { status: 503 };
