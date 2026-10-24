@@ -34,6 +34,8 @@ const COMMENT = { id: 11, subjectId: 7, body: "that bridge", atSecs: 161, create
 
 // What POST /v1/plays answers; a test sets it to simulate an outage.
 const playsServer = { status: 200 };
+// Synced lyrics shared for Jóga; a test sets `items` (and puts it back).
+const lyricsServer = { items: null };
 
 // A community with Jóga (a cue sheet, a comment) and Björk (songs with something shared).
 function route(log = []) {
@@ -42,7 +44,9 @@ function route(log = []) {
     const p = u.pathname;
     if (p === "/v1/subjects/resolve") {
       const kind = u.searchParams.get("kind");
-      if (kind === "track" && u.searchParams.get("title") === "Jóga") return { body: { subject: JOGA } };
+      if (kind === "track" && u.searchParams.get("title") === "Jóga") {
+        return { body: { subject: lyricsServer.items ? { ...JOGA, counts: { ...JOGA.counts, synced_lyrics: lyricsServer.items.length } } : JOGA } };
+      }
       if (kind === "artist" && u.searchParams.get("name") === "Björk") return { body: { subject: BJORK } };
       return undefined;
     }
@@ -61,6 +65,7 @@ function route(log = []) {
     if (p === "/v1/subjects/2/children") return { body: { tracks: [JOGA], albums: [] } };
     if (p === "/v1/subjects/7") return { body: { subject: JOGA } };
     if (p === "/v1/items" && u.searchParams.get("kind") === "cue_sheet") return { body: { items: [SHEET_ITEM] } };
+    if (p === "/v1/items" && u.searchParams.get("kind") === "synced_lyrics") return { body: { items: lyricsServer.items || [] } };
     return undefined;
   };
 }
@@ -134,6 +139,36 @@ test("the song's Community tab: its likes, the cue sheets to import, and comment
   await host.likeChanged({ kind: "track", name: "Jóga", artistName: "Björk", albumTitle: null, albumArtistName: null, liked: 1, previous: 0 });
   const redraw = host.sectionData.at(-1);
   assert.equal(redraw.typeId, "community_track");
+});
+
+test("the tab knows what you shared already: your rows say so, and publishing again is an update", async () => {
+  lyricsServer.items = [{ ...SHEET_ITEM, id: "lrc1", kind: "synced_lyrics", card: { title: "Björk — Jóga", facts: ["40 lines"] } }];
+  try {
+    const { host } = await setup({ session: { token: "vcom_tok", user: { login: "bob" } } });
+    await host.addSheet("Jóga", "Björk", { mode: "cards", cues: [{ at: 0, text: "hi" }] });
+    const tree = (await tab(host, "track", joga)).value;
+    const rows = nodes(tree, "track-row-list").filter((l) => l.items.some((i) => i.id === "abc123" || i.id === "lrc1")).flatMap((l) => l.items);
+    assert.equal(rows.length, 2);
+    for (const row of rows) {
+      assert.deepEqual(row.badge, { label: "Yours", variant: "success" });
+      assert.deepEqual(row.actions, ["page"], "nothing to import: it is yours");
+    }
+    const labels = nodes(tree, "button").map((b) => b.label);
+    assert.ok(labels.includes("Update my shared cue sheet"));
+    assert.ok(labels.includes("Update my shared synced lyrics"));
+    assert.ok(!labels.includes("Publish my cue sheet") && !labels.includes("Publish my synced lyrics"));
+
+    // Someone else's: still offered to import, and yours isn't up there yet.
+    const other = await setup({ session: SIGNED_IN });
+    await other.host.addSheet("Jóga", "Björk", { mode: "cards", cues: [{ at: 0, text: "hi" }] });
+    const theirs = (await tab(other.host, "track", joga)).value;
+    const otherLabels = nodes(theirs, "button").map((b) => b.label);
+    assert.ok(otherLabels.includes("Publish my cue sheet") && otherLabels.includes("Publish my synced lyrics"));
+    const lyricsRow = nodes(theirs, "track-row-list").flatMap((l) => l.items).find((i) => i.id === "lrc1");
+    assert.deepEqual(lyricsRow.actions, ["tab-import-lyrics", "page"]);
+  } finally {
+    lyricsServer.items = null;
+  }
 });
 
 test("a comment can be pinned to where the song is now", async () => {

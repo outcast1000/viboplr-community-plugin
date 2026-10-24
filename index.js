@@ -330,6 +330,23 @@ function withIcons(actions) {
   });
 }
 
+// Something the signed-in user published. There is at most one per song per
+// kind: publishing again updates it in place.
+function isMine(item) {
+  return !!(state.user && item && item.publisher && item.publisher.login === state.user.login);
+}
+
+function mineOf(items) {
+  return (items || []).filter(isMine)[0] || null;
+}
+
+// Your own shared item: nothing to import, it is yours already.
+function mineRow(row) {
+  row.badge = { label: "Yours", variant: "success" };
+  row.actions = ["page"];
+  return row;
+}
+
 // Any item → a row, from its card alone. An integration may then adjust it.
 function cardRow(m, item) {
   var card = item.card || { title: item.title, facts: [] };
@@ -354,6 +371,7 @@ var INTEGRATIONS = {
     row: function (item, row) {
       row.artistName = item.artistName || null;
       row.albumTitle = item.albumName || null;
+      if (isMine(item)) return mineRow(row);
       var imported = state.imports[songKey(item.title, item.artistName)];
       if (imported && imported.id === item.id) {
         if (imported.version < item.version) {
@@ -373,6 +391,7 @@ var INTEGRATIONS = {
     row: function (item, row) {
       row.artistName = item.artistName || null;
       row.albumTitle = item.albumName || null;
+      if (isMine(item)) return mineRow(row);
       var imported = state.lyricsImports[songKey(item.title, item.artistName)];
       if (imported && imported.id === item.id) {
         if (imported.version < item.version) {
@@ -1913,8 +1932,11 @@ function tabTree(data) {
   if (like) top.push(like);
   if (s) top.push({ type: "button", label: "Open the " + noun + "'s page", action: "tab-page", variant: "secondary" });
   if (e.kind === "track" && state.token) {
-    if (data.localSheet) top.push({ type: "button", label: "Publish my cue sheet", action: "tab-publish-sheet", variant: "secondary" });
-    top.push({ type: "button", label: "Publish my synced lyrics", action: "tab-publish-lyrics", variant: "secondary" });
+    // What you shared already is updated in place, so the button says so.
+    var sheetShared = !!mineOf(data.cues);
+    var lyricsShared = !!mineOf(data.lyrics);
+    if (data.localSheet) top.push({ type: "button", label: sheetShared ? "Update my shared cue sheet" : "Publish my cue sheet", action: "tab-publish-sheet", variant: "secondary" });
+    top.push({ type: "button", label: lyricsShared ? "Update my shared synced lyrics" : "Publish my synced lyrics", action: "tab-publish-lyrics", variant: "secondary" });
   }
   // Here rather than on the imported row: it works after those lyrics have
   // left the community too, and needs no sign-in.

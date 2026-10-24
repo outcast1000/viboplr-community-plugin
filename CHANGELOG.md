@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.7.2
+- **A song's Community tab knows what you shared already.** Your own cue sheet and synced lyrics are marked *Yours* in its lists, with no *Import* button (they're yours already). The buttons read *Update my shared cue sheet* / *Update my shared synced lyrics* when one of yours is up there, since publishing again updates it.
+
 ## v1.7.1
 - **One heart: Viboplr's own.** The Community tab's ♡ Like button is gone; the tab shows the count instead ("♥ 12 on Community · you like it"). A song, album or artist is liked with Viboplr's heart, and with *Send my likes to Community* on (Extensions → Viboplr Community) the like reaches Community too. The website no longer likes songs, albums or artists either, so Community and Viboplr can't disagree about what you like. Comments are still liked on the Community tab, and cue sheets, mixtapes and comments on the website.
 
