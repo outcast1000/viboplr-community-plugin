@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.7.3
+- Each AI tool now says what it is about (its category), so Viboplr's in-app assistant can offer it alongside the app's own tools of the same kind instead of sending every tool at once. Viboplr versions that don't know the field ignore it.
+
 ## v1.7.2
 - **A song's Community tab knows what you shared already.** Your own cue sheet and synced lyrics are marked *Yours* in its lists, with no *Import* button (they're yours already). The buttons read *Update my shared cue sheet* / *Update my shared synced lyrics* when one of yours is up there, since publishing again updates it.
 
