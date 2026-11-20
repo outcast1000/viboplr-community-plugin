@@ -697,13 +697,14 @@ function lyricsRoute(posted, at = { version: 1 }) {
 
 const JOGA_KEY = "track:bjork:joga";
 
-test("the plugin is not a lyrics provider", async () => {
-  const p = loadPlugin();
+test("the plugin is a lyrics provider, beside its own information types", async () => {
   const manifest = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "manifest.json"), "utf8"));
-  // The track page's "shared on Community" line, and the Community tab on each kind of page.
+  // Lyrics (a provider row in Settings → Providers), the track page's "shared on Community" line,
+  // and the Community tab on each kind of page.
   assert.deepEqual(
     manifest.contributes.informationTypes.map((t) => [t.id, t.entity, t.displayKind]),
     [
+      ["lyrics", "track", "lyrics"],
       ["community_shared", "track", "title_line"],
       ["community_track", "track", "plugin_view"],
       ["community_album", "album", "plugin_view"],
@@ -711,7 +712,102 @@ test("the plugin is not a lyrics provider", async () => {
     ]
   );
   assert.ok(manifest.permissions.includes("lyrics:write"));
-  assert.equal(p._provideLyrics, undefined);
+  const { host } = await setup(() => undefined);
+  assert.equal(typeof host.infoProviders.lyrics, "function");
+});
+
+const SIGNED_IN = { token: "vcom_tok", user: { login: "alice" } };
+
+// Two sheets shared for Jóga, most imported first: one timed to a 5:05 copy, one to a 4:00 edit.
+function providerRoute(items = [
+  { ...LYRICS_ITEM, id: "ly1", durationSecs: 305 },
+  { ...LYRICS_ITEM, id: "ly2", durationSecs: 240, publisher: { login: "carol" }, url: "https://community.viboplr.com/lyrics/ly2" },
+]) {
+  return (u) => {
+    if (u.pathname === "/v1/items" && u.searchParams.get("kind") === "synced_lyrics") {
+      return { body: { items: u.searchParams.get("title") === "Jóga" ? items : [] } };
+    }
+    const m = u.pathname.match(/^\/v1\/items\/(ly\d)$/);
+    if (m) {
+      const item = items.find((i) => i.id === m[1]);
+      return item ? { body: { item: { ...item, payload: { lrc: LRC.replace("Three", "Three " + item.id) } } } } : { status: 404, body: { error: "gone" } };
+    }
+  };
+}
+const lyricLookups = (host) => host.requests.filter((r) => r.url.includes("/v1/items"));
+
+test("the lyrics provider answers with the most-imported shared sheet, asked anonymously", async () => {
+  const { host } = await setup(providerRoute(), { session: SIGNED_IN });
+  const got = await host.infoProviders.lyrics({ kind: "track", id: 0, name: "Jóga", artistName: "Björk" });
+  assert.equal(got.status, "ok");
+  assert.equal(got.value.kind, "synced");
+  assert.match(got.value.text, /Three ly1/);
+  assert.deepEqual(got.value._meta, {
+    providerName: "Viboplr Community",
+    homepageUrl: "https://community.viboplr.com/lyrics/ly1",
+    communityId: "ly1",
+    by: "bob",
+  });
+  const [list] = lyricLookups(host);
+  assert.deepEqual([...new URL(list.url).searchParams], [["kind", "synced_lyrics"], ["title", "Jóga"], ["artist", "Björk"]]);
+  for (const r of lyricLookups(host)) assert.equal(r.init.headers.Authorization, undefined, "never as the member");
+  assert.deepEqual(lyricLookups(host).map((r) => r.init.timeoutMs), [5000, 5000], "providers below wait on it: seconds, not 15s each");
+  assert.equal(host.requests.filter((r) => r.url.endsWith("/imported")).length, 0, "a lookup is not an import");
+});
+
+test("the settings panel says what the lyrics provider sends and where it is switched off", async () => {
+  const { host } = await setup(() => undefined);
+  const section = nodes(host.lastView(), "section").find((x) => x.title === "While you listen");
+  const row = nodes({ children: section.children }, "settings-row").find((r) => r.label === "Shared synced lyrics");
+  assert.ok(row, "described where the other while-you-listen lookups are");
+  assert.match(row.description, /title and artist are sent, never your account/);
+  assert.match(row.description, /Settings → Providers → Lyrics/);
+  assert.equal(row.control, undefined, "no second switch: Settings → Providers owns on/off");
+});
+
+test("the lyrics provider takes the sheet timed to the song's own length", async () => {
+  const { host } = await setup(providerRoute());
+  const at = (durationSecs) => host.infoProviders.lyrics({ kind: "track", name: "Jóga", artistName: "Björk", durationSecs });
+  assert.match((await at(241)).value.text, /Three ly2/, "the 4:00 edit");
+  assert.match((await at(306)).value.text, /Three ly1/, "the album cut, within the slack");
+  assert.deepEqual(await at(400), { status: "not_found" }, "no sheet fits a 6:40 live take");
+});
+
+test("a sheet with no recorded length is judged by its last line", async () => {
+  const { host } = await setup(providerRoute([{ ...LYRICS_ITEM, id: "ly1", lastLineSecs: 200 }]));
+  const at = (durationSecs) => host.infoProviders.lyrics({ kind: "track", name: "Jóga", artistName: "Björk", durationSecs });
+  assert.equal((await at(240)).status, "ok");
+  assert.deepEqual(await at(150), { status: "not_found" }, "lyrics running past the end belong to a longer cut");
+});
+
+test("the lyrics provider: nothing shared is not_found, a failing server is an error", async () => {
+  let { host } = await setup(providerRoute());
+  assert.deepEqual(await host.infoProviders.lyrics({ kind: "track", name: "Hunter", artistName: "Björk" }), { status: "not_found" });
+  assert.equal(lyricLookups(host).length, 1, "one request for a miss");
+  assert.deepEqual(await host.infoProviders.lyrics({ kind: "track", name: "" }), { status: "not_found" });
+
+  ({ host } = await setup((u) => (u.pathname === "/v1/items" ? { status: 500, body: { error: "down" } } : undefined)));
+  const got = await host.infoProviders.lyrics({ kind: "track", name: "Jóga", artistName: "Björk" });
+  assert.equal(got.status, "error");
+  assert.match(got.message, /down/);
+});
+
+test("lyrics the provider put in place aren't published again, and importing that sheet doesn't ask", async () => {
+  const posted = [];
+  const { host } = await setup(lyricsRoute(posted), { session: SIGNED_IN });
+  host.lyricsCache.set(JOGA_KEY, {
+    text: LRC,
+    kind: "synced",
+    _meta: { providerName: "Viboplr Community", homepageUrl: LYRICS_ITEM.url, communityId: "ly1", by: "bob" },
+  });
+  await host.menu["publish-lyrics"]({ kind: "track", title: "Jóga", artistName: "Björk", albumTitle: "Homogenic" });
+  await flush();
+  assert.equal(posted.length, 0);
+  assert.match(host.lastNotice().message, /came from Viboplr Community already/);
+  await assert.rejects(host.tools.publish_lyrics({ title: "Jóga", artistName: "Björk" }), /came from Viboplr Community already/);
+
+  await openAndAnswer(host, "ly1");
+  assert.equal(host.lyricsSaves.length, 1, "the same sheet is imported without a replace question");
 });
 
 // How a lyrics item reads in a list (the Community tab's rows).

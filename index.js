@@ -40,16 +40,26 @@
 //    mixtape remembers where it came from in its playlist `metadata`
 //    ({ communityId, communityVersion }), so it is told apart from the user's
 //    own and a newer version replaces it.
-//  - AN IMPORT IS A ONE-OFF WRITE. Shared synced lyrics become the song's
-//    lyrics through api.lyrics.save, like an edit in the app; the plugin is not
-//    a lyrics provider and looks nothing up while anyone listens.
+//  - SHARED SYNCED LYRICS TWO WAYS. The plugin is a lyrics provider like any
+//    other (Settings → Providers orders it and switches it off): when the
+//    providers above it come back empty, it asks Community — anonymously, the
+//    song's names and nothing else — for the most-imported synced lyrics that
+//    fit the song's length. And an IMPORT is still a one-off write, for picking
+//    a particular sheet on the Community tab: api.lyrics.save, like an edit in
+//    the app, so it outranks whatever any provider answers later.
 //  - MUSIC LIVES ON VIBOPLR'S OWN PAGES. Cue sheets, synced lyrics, likes
 //    and comments about a song, album or artist are a "Community" tab on
 //    that page (a `plugin_view` information type).
 //  - NOTHING IS ASKED WHILE MUSIC PLAYS unless the user switched it on: the
 //    Now Playing item and the seek-bar ticks (timed comments) both name every
 //    song played to the server, so both start off.
-//    The one exception is SHARED WAVEFORMS (signed in, "Share waveforms" on
+//    Two exceptions, both on by default and both described in the settings
+//    panel. SHARED SYNCED LYRICS: the plugin is a lyrics provider, and Now
+//    Playing fetches lyrics for what plays, so a song no provider ahead of it
+//    has synced lyrics for is looked up on Community — anonymously (names
+//    only, no token), at most once a day per song (the host caches misses).
+//    It is switched off in Settings → Providers, not here: one switch per
+//    decision. And SHARED WAVEFORMS (signed in, "Share waveforms" on
 //    by default): the app asks only when it has no waveform of its own for
 //    the song, and that ask is also how the copy's format (codec, rate,
 //    depth) is counted in the public format stats. It goes as the member, so
@@ -1078,10 +1088,89 @@ function openShared(id) {
 //
 // Importing is a one-off act: the shared LRC becomes the song's lyrics through
 // the host's api.lyrics.save — the same write as editing them in the app — and
-// from then on the app shows it like any lyrics it has. The plugin is not a
-// lyrics provider and looks nothing up while anyone listens. It only remembers
+// from then on the app shows it like any lyrics it has. It only remembers
 // which songs it imported (and which version), for the Imported / Update
 // badges and for Undo, which hands the song back to the user's provider chain.
+//
+// The plugin is also one of the providers in that chain (registerLyricsProvider):
+// a song nobody above it in Settings → Providers has lyrics for gets the shared
+// synced lyrics that fit it best. What it answers carries `_meta.communityId`,
+// so a publish can tell them from the user's own and an import of the same
+// sheet doesn't ask to replace itself.
+
+var LYRICS_PROVIDER_NAME = "Viboplr Community";
+// How far a shared sheet's recorded length may stray from the song's: the
+// same cut give or take an encoder's padding, not a radio edit or a live take.
+var LYRICS_FIT_MIN_SECS = 3;
+var LYRICS_FIT_RATIO = 0.03;
+// Each of the provider's two requests. The host gives a provider no deadline
+// of its own, and the providers below this one wait while it runs, so a slow
+// server must cost seconds, not the plugin's general 15s twice.
+var LYRICS_LOOKUP_TIMEOUT_MS = 5000;
+
+function knownDuration(d) {
+  return typeof d === "number" && isFinite(d) && d > 0 ? d : null;
+}
+
+// Whether a shared sheet was timed to a copy as long as this song. A sheet
+// with no recorded length is judged by its last line: one that runs past the
+// end was timed to a longer cut.
+function lyricsFit(item, duration) {
+  if (duration == null) return true;
+  var theirs = knownDuration(item.durationSecs);
+  if (theirs != null) return Math.abs(theirs - duration) <= Math.max(LYRICS_FIT_MIN_SECS, duration * LYRICS_FIT_RATIO);
+  var last = knownDuration(item.lastLineSecs);
+  return last == null || last <= duration + LYRICS_FIT_MIN_SECS;
+}
+
+// The provider. The server lists a song's sheets most-imported first, so the
+// first that fits is the one most people chose. Anonymous on purpose: with a
+// token the server could tie every song looked up to the account.
+function fetchSharedLyrics(entity) {
+  if (!entity || !entity.name) return Promise.resolve({ status: "not_found" });
+  var q = { kind: "synced_lyrics", title: entity.name };
+  if (entity.artistName) q.artist = entity.artistName;
+  var duration = knownDuration(entity.durationSecs);
+  return request("GET", "/v1/items?" + queryString(q), undefined, false, LYRICS_LOOKUP_TIMEOUT_MS)
+    .then(function (d) {
+      var pick = ((d && d.items) || []).filter(function (item) {
+        return item && item.id && lyricsFit(item, duration);
+      })[0];
+      if (!pick) return { status: "not_found" };
+      return fetchItem(pick.id, LYRICS_LOOKUP_TIMEOUT_MS).then(function (item) {
+        var lrc = item && item.payload && item.payload.lrc;
+        if (typeof lrc !== "string" || !lrc.trim()) return { status: "not_found" };
+        return {
+          status: "ok",
+          value: {
+            text: lrc,
+            kind: "synced",
+            _meta: {
+              providerName: LYRICS_PROVIDER_NAME,
+              homepageUrl: item.url,
+              communityId: item.id,
+              by: (item.publisher && item.publisher.login) || null,
+            },
+          },
+        };
+      });
+    })
+    .catch(function (e) {
+      if (e && e.status === 404) return { status: "not_found" };
+      api.log("warn", "Couldn't look up shared lyrics for " + entity.name + ": " + errorText(e));
+      return { status: "error", message: errorText(e) };
+    });
+}
+
+function registerLyricsProvider() {
+  if (!api.informationTypes || typeof api.informationTypes.onFetch !== "function") return;
+  api.informationTypes.onFetch("lyrics", fetchSharedLyrics);
+}
+
+// The Community sheet these lyrics came from, when this provider answered them.
+function communityIdOf(value) {
+  return (value && value._meta && value._meta.communityId) || null;
+}
 
 function trackEntity(title, artist, album) {
   var e = { kind: "track", name: title };
@@ -1154,7 +1243,7 @@ function importLyrics(id, confirmed, ask) {
       var ours = rec && rec.id === item.id;
       var check = confirmed || ours ? Promise.resolve(null) : currentLyrics(item.title, item.artistName);
       return check.then(function (existing) {
-        if (existing && existing.kind === "synced" && !confirmed) {
+        if (existing && existing.kind === "synced" && !confirmed && communityIdOf(existing) !== item.id) {
           var question = {
             kind: "replace-lyrics",
             id: item.id,
@@ -1224,6 +1313,9 @@ function publishLyricsCore(title, artist, album) {
   return currentLyrics(title, artist).then(function (value) {
     if (!value || typeof value.text !== "string" || !value.text.trim()) return { status: "no-lyrics" };
     if (value.kind !== "synced") return { status: "plain-only" };
+    // Lyrics this provider put in place are someone's shared sheet already:
+    // publishing them would put a copy of it under this account.
+    if (communityIdOf(value)) return { status: "from-community", url: value._meta.homepageUrl || null };
     var body = { kind: "synced_lyrics", title: title, artistName: artist || undefined, lrc: value.text };
     var now = api.playback && api.playback.getCurrentTrack ? api.playback.getCurrentTrack() : null;
     if (now && songKey(now.title, now.artist_name) === songKey(title, artist) && now.duration_secs) body.durationSecs = now.duration_secs;
@@ -1246,6 +1338,7 @@ function publishLyrics(title, artist, album) {
     .then(function (out) {
       if (out.status === "no-lyrics") notify("There are no lyrics for “" + title + "” to publish.");
       else if (out.status === "plain-only") notify("“" + title + "” only has plain lyrics. Only synced lyrics can be shared.");
+      else if (out.status === "from-community") notify("The synced lyrics for “" + title + "” came from Viboplr Community already. Edit them in the app first to share your own.");
       else {
         notify((out.status === "published" ? "Published the synced lyrics for “" : "Updated the synced lyrics for “") + title + "”.", {
           action: { label: "Open page", id: "open-last-published" },
@@ -1315,6 +1408,7 @@ function publishLyricsTool(args) {
   }).then(function (out) {
     if (out.status === "no-lyrics") throw new Error("Viboplr has no lyrics for “" + title + "”. Nothing was published.");
     if (out.status === "plain-only") throw new Error("“" + title + "” only has plain lyrics in Viboplr; only synced lyrics can be shared. Nothing was published.");
+    if (out.status === "from-community") throw new Error("The synced lyrics Viboplr shows for “" + title + "” came from Viboplr Community already" + (out.url ? " (" + out.url + ")" : "") + ". Nothing was published; to share your own, save edited lyrics for the song in Viboplr first.");
     return { status: out.status, id: out.item.id, url: out.item.url };
   });
 }
@@ -1448,8 +1542,8 @@ function savedPlaylistFor(id) {
   return null;
 }
 
-function fetchItem(id) {
-  return request("GET", "/v1/items/" + encodeURIComponent(id)).then(function (data) {
+function fetchItem(id, timeoutMs) {
+  return request("GET", "/v1/items/" + encodeURIComponent(id), undefined, false, timeoutMs).then(function (data) {
     return data.item;
   });
 }
@@ -3012,11 +3106,25 @@ function accountNodes() {
   return nodes;
 }
 
+// What the lyrics provider sends, and where it is switched off. There is no
+// switch here on purpose: the provider's on/off and its place in the chain are
+// Settings → Providers', and a second switch would disagree with it.
+function lyricsProviderNodes() {
+  return [
+    {
+      type: "settings-row",
+      label: "Shared synced lyrics",
+      description:
+        "When a song has no synced lyrics from the lyrics providers ahead of Viboplr Community, Viboplr looks for synced lyrics shared on Community, and shows the most-imported ones timed to a copy as long as yours. Only the song's title and artist are sent, never your account, and a song with nothing shared is asked about at most once a day. Turn it off, or move it, in Settings → Providers → Lyrics.",
+    },
+  ];
+}
+
 // The settings panel: the account, then every switch the plugin has.
 function settingsNodes() {
   return [
     { type: "section", title: "Account", children: accountNodes() },
-    { type: "section", title: "While you listen", children: tickNodes().concat(cueSuggestNodes()) },
+    { type: "section", title: "While you listen", children: lyricsProviderNodes().concat(tickNodes(), cueSuggestNodes()) },
     { type: "section", title: "Send from Viboplr", children: scrobbleNodes().concat(likeSyncNodes()) },
     { type: "section", title: "Share with Viboplr Community", children: waveformNodes() },
   ];
@@ -3213,6 +3321,7 @@ function activate(pluginApi) {
   });
   api.network.onDeepLink(onDeepLink);
   registerSongCounts();
+  registerLyricsProvider();
   registerTabs();
   if (api.playback && typeof api.playback.onTrackStarted === "function") {
     api.playback.onTrackStarted(function (track) {

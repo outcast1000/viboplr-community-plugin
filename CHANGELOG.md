@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.8.0
+- **Viboplr Community is now a lyrics provider.** When the lyrics providers ahead of it have nothing for a song, Viboplr asks Community for shared synced lyrics, and shows the most-imported sheet timed to a copy as long as yours (within 3 seconds, or 3%). It is one row in Settings → Providers → Lyrics, so you can move it up or down or switch it off. Lookups go without your account (the song's title and artist only, even when you're signed in), and nothing counts as an import. Extensions → Viboplr Community → While you listen says so too. Lyrics found this way can't be published again under your name: edit them in the app first. Importing a particular sheet from a song's Community tab works as before and still wins over every provider.
+
 ## v1.7.3
 - Each AI tool now says what it is about (its category), so Viboplr's in-app assistant can offer it alongside the app's own tools of the same kind instead of sending every tool at once. Viboplr versions that don't know the field ignore it.
 
