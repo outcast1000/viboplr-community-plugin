@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.11.0
+- **Synced lyrics and cue sheets are published automatically.** While you're signed in, Viboplr sends synced lyrics to Community as it gets them (the ones you edit, the ones the assistant saves, and the ones a lyrics provider such as LRCLIB finds), and cue sheets as you or the assistant write them. It's on by default; switch it off in Extensions → Viboplr Community → *Share with Viboplr Community*. Nothing goes out twice: Viboplr remembers what it sent, and before publishing lyrics it checks whether you already shared the same text. Lyrics and sheets imported from Community aren't published again. A song still has to be in your library at one length, so the recording it's timed to is known; others are skipped without asking the server. Publishing goes one song at a time through a queue that's kept across restarts, and when Community's hourly limit (60 an hour) is reached the queue waits for the next hour. The settings show how many songs are waiting and what happened last. Cue sheets need a Viboplr with `api.cues.onChanged`; on older ones only lyrics are published.
+
 ## v1.10.1
 - **Your own sheets are yours to publish again.** A cue sheet you imported from Viboplr Community and left unchanged was refused as "someone's shared sheet already", even when it was one you published yourself (imported back on another computer, say). Now only someone else's untouched import is refused. Yours publishes, under its own author again (the " · via @you" an import adds comes off). Imports from earlier versions are recognised by that same author label. The same goes for synced lyrics the lyrics provider found: if the sheet it found is yours, you can publish it.
 

@@ -4,7 +4,7 @@
 // for a 404.
 
 // `waveforms: false` is an app from before api.waveforms (it never asks).
-function makeHost({ route, current = null, queue = [], appVersion = "1.0.94", waveforms = true, uiContext = null } = {}) {
+function makeHost({ route, current = null, queue = [], appVersion = "1.0.94", waveforms = true, uiContext = null, changeEvents = true } = {}) {
   const host = {
     requests: [],
     opened: [],
@@ -277,8 +277,26 @@ function makeHost({ route, current = null, queue = [], appVersion = "1.0.94", wa
     return Promise.resolve(host.contextHandler ? host.contextHandler(ctx) : undefined);
   };
 
+  // Lyrics and cue-sheet change events (api.lyrics.onChanged /
+  // api.cues.onChanged). `changeEvents: false` is an app from before them.
+  // host.lyricsChanged(change) / host.cuesChanged(change) play the app.
+  host.lyricsChangedHandler = null;
+  host.cuesChangedHandler = null;
+  if (changeEvents) {
+    host.api.lyrics.onChanged = (handler) => {
+      host.lyricsChangedHandler = handler;
+      return () => {};
+    };
+    host.api.cues.onChanged = (handler) => {
+      host.cuesChangedHandler = handler;
+      return () => {};
+    };
+  }
+  host.lyricsChanged = (change) => host.lyricsChangedHandler && host.lyricsChangedHandler(change);
+  host.cuesChanged = (change) => host.cuesChangedHandler && host.cuesChangedHandler(change);
+
   host.current = current;
-  host.lastView = () => host.views[host.views.length - 1].data;
+  host.lastView =() => host.views[host.views.length - 1].data;
   host.lastHeader = () => host.headers[host.headers.length - 1].header;
   host.lastNotice = () => host.notices[host.notices.length - 1];
   host.addSheet = (title, artist, sheet, extra = {}) => host.api.cues.set(title, artist, sheet, extra);

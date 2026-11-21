@@ -125,6 +125,19 @@ function freshState() {
     // Ask Community for a waveform the app doesn't have, and share one it
     // computed. On by default: only an explicit switch-off is stored as false.
     shareWaveforms: true,
+    // Publish synced lyrics and cue sheets as they land (see Auto-publish).
+    // On by default: only an explicit switch-off is stored as false.
+    autoPublish: true,
+    // Waiting jobs, saved: { key, kind: "lyrics" | "cues", title, artist, … }.
+    autoQueue: [],
+    // What was last sent per song (autoKey → lyrics text hash or the cue
+    // sheet's updatedAt), saved, so nothing is published twice.
+    autoSent: {},
+    // Not saved: the job running, its timer, the 429 wait, the last outcome.
+    autoBusy: false,
+    autoTimer: null,
+    autoBlockedUntil: 0,
+    autoLast: null,
     // Shared cue sheets in Now Playing: "off" | "notify" | "auto".
     cueSuggest: "notify",
     // Songs already checked (song key → when), so each is offered once.
@@ -700,6 +713,7 @@ function completeSignIn(data) {
     .then(function () {
       notify("Signed in to Viboplr Community as @" + state.user.login + ".");
       render();
+      kickAutoPublish(0);
       return Promise.all([redrawTabs(true), sendPlaysAndReport()]);
     })
     .catch(function (e) {
@@ -1421,22 +1435,30 @@ function publishLyricsCore(title, artist, album) {
     // publishing them would put a copy of it under this account.
     // Unless the sheet the provider found is the member's own.
     if (communityIdOf(value) && !isMe(value._meta.by)) return { status: "from-community", url: value._meta.homepageUrl || null };
-    var body = { kind: "synced_lyrics", title: title, artistName: artist || undefined, lrc: value.text };
-    return Promise.all([albumFor(title, artist, album), songLength(title, artist, album, null)])
-      .then(function (got) {
-        var found = got[0];
-        if (got[1] == null) return null;
-        if (found.album) body.albumName = found.album;
-        if (found.albumArtist) body.albumArtistName = found.albumArtist;
-        body.durationSecs = got[1];
-        return request("POST", "/v1/items", body, true);
-      })
-      .then(function (data) {
-        if (!data) return { status: "no-length" };
-        state.lastPublishedUrl = data.item.url;
-        return { status: data.created ? "published" : "updated", item: data.item };
-      });
+    return sendLyrics(title, artist, album, value.text, null);
   });
+}
+
+// POST one song's synced lyrics: the album and the length of the recording
+// they're timed to are filled in here (songLength — `ownLength` when the
+// caller already knows it). Resolves { status: "published" | "updated", item }
+// or { status: "no-length" }; rejects when the server says no.
+function sendLyrics(title, artist, album, lrc, ownLength) {
+  var body = { kind: "synced_lyrics", title: title, artistName: artist || undefined, lrc: lrc };
+  return Promise.all([albumFor(title, artist, album), songLength(title, artist, album, ownLength)])
+    .then(function (got) {
+      var found = got[0];
+      if (got[1] == null) return null;
+      if (found.album) body.albumName = found.album;
+      if (found.albumArtist) body.albumArtistName = found.albumArtist;
+      body.durationSecs = got[1];
+      return request("POST", "/v1/items", body, true);
+    })
+    .then(function (data) {
+      if (!data) return { status: "no-length" };
+      state.lastPublishedUrl = data.item.url;
+      return { status: data.created ? "published" : "updated", item: data.item };
+    });
 }
 
 function publishLyrics(title, artist, album) {
@@ -3179,6 +3201,254 @@ function waveformNodes() {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-publish
+// ---------------------------------------------------------------------------
+//
+// Synced lyrics and cue sheets are published as they land in the app, while
+// the member is signed in and hasn't switched it off (on by default — owner
+// decision, 2026-11-21: only an explicit switch-off is stored as false).
+// Lyrics: every synced lyric put in place (`api.lyrics.onChanged`) — the
+// member's edits, the assistant's saves, and lyrics a provider found —
+// except the ones this plugin's own provider served, which are someone's
+// shared sheet already. Cue sheets: every save by the assistant or another
+// plugin (`api.cues.onChanged`); this plugin's imports never come back here.
+//
+// Publishing spends Community's write budget (60 an hour per member), so the
+// work goes through one queue, one at a time, and nothing is sent twice: a
+// song's text (lyrics) or `updatedAt` (cue sheet) is remembered once sent, and
+// before a lyric is posted the server is asked whether this member already
+// has the same text up — reads cost no budget. A 429 parks the queue until
+// the window reopens. The queue is saved, so an edit made just before
+// quitting still goes out.
+
+var AUTO_GAP_MS = 3000;
+var AUTO_RATE_WAIT_MS = 10 * 60 * 1000;
+var AUTO_RETRY_MS = 5 * 60 * 1000;
+var AUTO_MAX_TRIES = 3;
+var AUTO_QUEUE_MAX = 500;
+var AUTO_SENT_MAX = 5000;
+
+// A short fingerprint of a text, to tell "the same lyrics again" from new ones.
+function textHash(s) {
+  var h = 5381;
+  for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36) + ":" + s.length;
+}
+
+function autoKey(kind, title, artist) {
+  return kind + "|" + songKey(title, artist);
+}
+
+function canAutoPublishLyrics() {
+  return !!(api && api.lyrics && typeof api.lyrics.onChanged === "function");
+}
+
+function canAutoPublishCues() {
+  return !!(api && api.cues && typeof api.cues.onChanged === "function");
+}
+
+function autoPublishOn() {
+  return !!(state && state.autoPublish && state.token);
+}
+
+function saveAutoState() {
+  return Promise.all([api.storage.set("autoQueue", state.autoQueue), api.storage.set("autoSent", state.autoSent)]).catch(function (e) {
+    api.log("warn", "Couldn't save the auto-publish queue: " + errorText(e));
+  });
+}
+
+function rememberSent(key, mark) {
+  delete state.autoSent[key];
+  state.autoSent[key] = mark;
+  var keys = Object.keys(state.autoSent);
+  for (var i = 0; i < keys.length - AUTO_SENT_MAX; i++) delete state.autoSent[keys[i]];
+}
+
+// Add a job, replacing one already waiting for the same song (the newer text
+// or sheet is the one to send).
+function enqueueAuto(job) {
+  state.autoQueue = state.autoQueue.filter(function (j) {
+    return j.key !== job.key;
+  });
+  state.autoQueue.push(job);
+  if (state.autoQueue.length > AUTO_QUEUE_MAX) state.autoQueue.splice(0, state.autoQueue.length - AUTO_QUEUE_MAX);
+  saveAutoState();
+  kickAutoPublish(0);
+}
+
+function onLyricsChanged(change) {
+  if (!autoPublishOn() || !change || change.kind !== "synced" || !change.title || typeof change.text !== "string") return;
+  // Lyrics this plugin's provider served are a member's shared sheet.
+  if (change.origin === "provider" && typeof change.provider === "string" && change.provider.split("/")[0] === "community") return;
+  var key = autoKey("lyrics", change.title, change.artistName);
+  var hash = textHash(change.text.trim());
+  if (state.autoSent[key] === hash) return;
+  enqueueAuto({
+    key: key,
+    kind: "lyrics",
+    title: change.title,
+    artist: change.artistName || null,
+    album: change.albumTitle || null,
+    durationSecs: knownDuration(change.durationSecs),
+    text: change.text,
+    hash: hash,
+    tries: 0,
+  });
+}
+
+function onCuesChanged(change) {
+  if (!autoPublishOn() || !change || change.action !== "saved" || !change.title) return;
+  var key = autoKey("cues", change.title, change.artistName);
+  if (change.updatedAt != null && state.autoSent[key] === change.updatedAt) return;
+  enqueueAuto({ key: key, kind: "cues", title: change.title, artist: change.artistName || null, tries: 0 });
+}
+
+function kickAutoPublish(delayMs) {
+  if (!api || state.autoBusy || state.autoTimer || !autoPublishOn() || !state.autoQueue.length) return;
+  var wait = Math.max(delayMs || 0, state.autoBlockedUntil - Date.now());
+  state.autoTimer = setTimeout(function () {
+    state.autoTimer = null;
+    runAutoPublish();
+  }, Math.max(0, wait));
+}
+
+// The member's own copy of a song's lyrics, when its text is this one.
+function sameLyricsPublished(job) {
+  var q = { kind: "synced_lyrics", title: job.title, artist: job.artist };
+  return request("GET", "/v1/items?" + queryString(q), undefined, true).then(function (data) {
+    var mine = ((data && data.items) || []).filter(function (it) {
+      return it.publisher && isMe(it.publisher.login);
+    });
+    if (!mine.length) return false;
+    return Promise.all(
+      mine.map(function (it) {
+        return fetchItem(it.id).then(function (item) {
+          return !!(item && item.payload && typeof item.payload.lrc === "string" && item.payload.lrc.trim() === job.text.trim());
+        });
+      })
+    ).then(function (same) {
+      return same.indexOf(true) >= 0;
+    });
+  });
+}
+
+function publishAutoJob(job) {
+  if (job.kind === "cues") {
+    return publishCuesCore(job.title, job.artist).then(function (out) {
+      if (out.status === "published" || out.status === "updated") {
+        return api.cues.get(job.title, job.artist).then(function (row) {
+          if (row) rememberSent(job.key, row.updatedAt);
+          return out;
+        });
+      }
+      return out;
+    });
+  }
+  // The length first: a song that isn't in the library (or is there at several
+  // lengths) can't be published, and finding that out costs no request.
+  return songLength(job.title, job.artist, job.album, job.durationSecs).then(function (length) {
+    if (length == null) return { status: "no-length" };
+    return sameLyricsPublished(job).then(function (same) {
+      if (same) {
+        rememberSent(job.key, job.hash);
+        return { status: "already" };
+      }
+      return sendLyrics(job.title, job.artist, job.album, job.text, length).then(function (out) {
+        if (out.status === "published" || out.status === "updated") rememberSent(job.key, job.hash);
+        return out;
+      });
+    });
+  });
+}
+
+function autoOutcomeText(job, out) {
+  var what = (job.kind === "cues" ? "the cue sheet for “" : "synced lyrics for “") + job.title + "”";
+  if (out.status === "published") return "Published " + what + ".";
+  if (out.status === "updated") return "Updated " + what + ".";
+  if (out.status === "already") return "Already shared: " + what + ".";
+  if (out.status === "no-length") return "Skipped " + what + ": it isn't in your library at one length, so the recording it's timed to can't be told.";
+  if (out.status === "from-community") return "Skipped " + what + ": it came from Viboplr Community unchanged.";
+  if (out.status === "no-sheet") return "Skipped " + what + ": it was deleted.";
+  return "Skipped " + what + ".";
+}
+
+function runAutoPublish() {
+  if (!api || !autoPublishOn() || !state.autoQueue.length) return Promise.resolve();
+  var job = state.autoQueue[0];
+  state.autoBusy = true;
+  return publishAutoJob(job)
+    .then(
+      function (out) {
+        state.autoQueue.shift();
+        state.autoLast = { text: autoOutcomeText(job, out), error: false, at: Date.now() };
+        api.log("info", "Auto-publish: " + state.autoLast.text);
+        return AUTO_GAP_MS;
+      },
+      function (e) {
+        var status = e && e.status;
+        if (status === 429) {
+          // Community's hourly budget is spent: wait for the window, keep the job.
+          state.autoBlockedUntil = Date.now() + AUTO_RATE_WAIT_MS;
+          state.autoLast = { text: "Community's hourly limit is reached; the rest goes out later.", error: false, at: Date.now() };
+          api.log("warn", "Auto-publish: rate limited, waiting " + AUTO_RATE_WAIT_MS / 60000 + " minutes");
+          return 0;
+        }
+        if (status === 401) return 0; // signed out (sessionLost ran); the queue waits for a sign-in
+        job.tries = (job.tries || 0) + 1;
+        var again = routineFailure(e) && job.tries < AUTO_MAX_TRIES;
+        if (!again) state.autoQueue.shift();
+        state.autoLast = { text: "Couldn't publish “" + job.title + "”: " + errorText(e), error: true, at: Date.now() };
+        api.log(again ? "warn" : "error", "Auto-publish: " + state.autoLast.text + (again ? " (will try again)" : ""));
+        if (again) state.autoBlockedUntil = Date.now() + AUTO_RETRY_MS;
+        return AUTO_GAP_MS;
+      }
+    )
+    .then(function (gap) {
+      state.autoBusy = false;
+      saveAutoState();
+      render();
+      kickAutoPublish(gap);
+    });
+}
+
+function setAutoPublish(on) {
+  state.autoPublish = !!on;
+  return api.storage.set("autoPublish", state.autoPublish).then(function () {
+    render();
+    kickAutoPublish(0);
+  });
+}
+
+function autoPublishNodes() {
+  if (!canAutoPublishLyrics() && !canAutoPublishCues()) {
+    return [{ type: "text", className: "ds-muted", content: "Publishing automatically needs a newer Viboplr." }];
+  }
+  var nodes = [
+    {
+      type: "settings-row",
+      label: "Publish synced lyrics and cue sheets automatically",
+      description:
+        "Synced lyrics are published to Viboplr Community under your account as Viboplr gets them — the ones you edit or the assistant saves, and the ones a lyrics provider finds — and so are cue sheets as you or the assistant write them. Lyrics and sheets imported from Community aren't published again, and something already shared isn't sent twice. A song must be in your library at one length, so the recording it's timed to is known." +
+        (canAutoPublishCues() ? "" : " Cue sheets need a newer Viboplr; only lyrics are published."),
+      control: { type: "toggle", label: "", action: "toggle-auto-publish", checked: state.autoPublish && !!state.token, disabled: !state.token },
+    },
+  ];
+  if (!state.token) {
+    nodes.push({ type: "text", className: "ds-muted", content: "Sign in to publish automatically." });
+    return nodes;
+  }
+  if (state.autoQueue.length) {
+    nodes.push({
+      type: "text",
+      className: "ds-muted",
+      content: plural(state.autoQueue.length, "song", "songs") + " waiting to be published (Community takes 60 an hour)." + (state.autoPublish ? "" : " Switch it on to send them."),
+    });
+  }
+  if (state.autoLast) nodes.push({ type: "text", className: "ds-muted", content: "Last: " + state.autoLast.text });
+  return nodes;
+}
+
+// ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
@@ -3274,7 +3544,7 @@ function settingsNodes() {
     { type: "section", title: "Account", children: accountNodes() },
     { type: "section", title: "While you listen", children: lyricsProviderNodes().concat(tickNodes(), cueSuggestNodes()) },
     { type: "section", title: "Send from Viboplr", children: scrobbleNodes().concat(likeSyncNodes()) },
-    { type: "section", title: "Share with Viboplr Community", children: waveformNodes() },
+    { type: "section", title: "Share with Viboplr Community", children: autoPublishNodes().concat(waveformNodes()) },
   ];
 }
 
@@ -3380,6 +3650,10 @@ var ACTIONS = {
     if (!state.token) return Promise.resolve(render());
     return setShareWaveforms(p && p.value);
   },
+  "toggle-auto-publish": function (p) {
+    if (!state.token) return Promise.resolve(render());
+    return setAutoPublish(p && p.value);
+  },
   "set-cue-suggest": function (p) {
     return setCueSuggest(p && p.value);
   },
@@ -3483,6 +3757,8 @@ function activate(pluginApi) {
   if (canSuggestCues()) api.ui.onContextChanged(checkSharedCues);
   if (canSyncLikes()) api.library.onLikeChanged(onLikeChanged);
   if (canScrobble()) api.playback.onTrackScrobbled(onTrackScrobbled);
+  if (canAutoPublishLyrics()) api.lyrics.onChanged(onLyricsChanged);
+  if (canAutoPublishCues()) api.cues.onChanged(onCuesChanged);
   // An older Viboplr has no api.waveforms and simply never asks.
   if (canShareWaveforms()) {
     api.waveforms.onLookup(onWaveformLookup);
@@ -3501,6 +3777,9 @@ function activate(pluginApi) {
     api.storage.get("shareWaveforms"),
     api.storage.get("cueSuggest"),
     api.storage.get("cueAsked"),
+    api.storage.get("autoPublish"),
+    api.storage.get("autoQueue"),
+    api.storage.get("autoSent"),
   ]).then(function (vals) {
     var session = vals[0];
     if (session && session.token) {
@@ -3520,6 +3799,18 @@ function activate(pluginApi) {
     state.cueSuggest = CUE_SUGGEST_MODES.indexOf(vals[9]) >= 0 ? vals[9] : "notify";
     // A song checked before this run started stays checked.
     state.cueAsked = Object.assign(vals[10] && typeof vals[10] === "object" ? vals[10] : {}, state.cueAsked);
+    state.autoPublish = vals[11] !== false;
+    // A change heard while storage was being read joins the saved ones.
+    var savedQueue = Array.isArray(vals[12]) ? vals[12] : [];
+    var heard = state.autoQueue.map(function (j) {
+      return j.key;
+    });
+    state.autoQueue = savedQueue
+      .filter(function (j) {
+        return j && j.key && heard.indexOf(j.key) < 0;
+      })
+      .concat(state.autoQueue);
+    state.autoSent = Object.assign(vals[13] && typeof vals[13] === "object" ? vals[13] : {}, state.autoSent);
   });
   // The waveform handlers above can be called before this lands.
   state.restored = restored;
@@ -3531,6 +3822,8 @@ function activate(pluginApi) {
     if (api) checkSharedCuesNow();
     // Plays left waiting by the last run (offline, or the app closed).
     if (api) sendPlaysAndReport();
+    // Lyrics and cue sheets left waiting by the last run.
+    if (api) kickAutoPublish(FIRST_LOAD_DELAY_MS);
   });
   restored
     .catch(function (e) {
@@ -3553,6 +3846,8 @@ function deactivate() {
   firstLoadTimer = null;
   if (playRetryTimer) clearTimeout(playRetryTimer);
   playRetryTimer = null;
+  if (state && state.autoTimer) clearTimeout(state.autoTimer);
+  if (state) state.autoTimer = null;
   playSending = null;
   if (state) stopSignIn();
   api = null;
