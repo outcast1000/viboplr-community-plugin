@@ -353,6 +353,43 @@ test("publishing needs a sign-in and refuses an untouched import", async () => {
   assert.match(signedIn.lastNotice().message, /isn't yours/);
 });
 
+test("your own sheet imported back is still yours to publish, under your own author", async () => {
+  const posts = [];
+  const route = (u, init) => {
+    if (u.pathname === "/v1/items/abc123") return { body: { item: { ...ITEM, payload: SHEET } } };
+    if (u.pathname === "/v1/items" && init.method === "POST") {
+      posts.push(JSON.parse(init.body));
+      return { status: 200, body: { item: { ...ITEM }, created: false } };
+    }
+    return { status: 204 };
+  };
+  // ITEM is alice's. Imported back into her own app, untouched:
+  const { plugin, host } = await setup(route, { session: { token: "vcom_tok", user: { login: "alice" } } });
+  await openAndAnswer(host, "abc123");
+  assert.equal(host.storage.get("imports")["track:bjork:joga"].by, "alice", "the import remembers whose it was");
+  assert.equal((await host.api.cues.get("Jóga", "Björk")).author, "Claude · via @alice");
+  await host.menu["publish-cues"]({ kind: "track", title: "Jóga", artistName: "Björk" });
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].author, "Claude", "the round trip's \" · via @alice\" comes off");
+  assert.equal(posts[0].durationSecs, 305);
+
+  // An import from before `by` was kept: the author label still says whose it is.
+  const imports = host.storage.get("imports");
+  delete imports["track:bjork:joga"].by;
+  host.storage.set("imports", imports);
+  plugin.deactivate();
+  await loadPlugin().activate(host.api);
+  await host.menu["publish-cues"]({ kind: "track", title: "Jóga", artistName: "Björk" });
+  assert.equal(posts.length, 2);
+
+  // Someone else's untouched import is still refused.
+  const { host: bob } = await setup(route, { session: { token: "vcom_tok", user: { login: "bob" } } });
+  await openAndAnswer(bob, "abc123");
+  await bob.menu["publish-cues"]({ kind: "track", title: "Jóga", artistName: "Björk" });
+  assert.equal(posts.length, 2);
+  assert.match(bob.lastNotice().message, /isn't yours/);
+});
+
 test("a 401 signs the plugin out instead of failing silently", async () => {
   const { host } = await setup(
     (u) => {
@@ -820,6 +857,19 @@ test("lyrics the provider put in place aren't published again, and importing tha
 
   await openAndAnswer(host, "ly1");
   assert.equal(host.lyricsSaves.length, 1, "the same sheet is imported without a replace question");
+});
+
+test("lyrics the provider found that are your own sheet can be published again", async () => {
+  const posted = [];
+  const { host } = await setup(lyricsRoute(posted), { session: SIGNED_IN, current: { title: "Jóga", artist_name: "Björk", duration_secs: 305 } });
+  host.lyricsCache.set(JOGA_KEY, {
+    text: LRC,
+    kind: "synced",
+    _meta: { providerName: "Viboplr Community", homepageUrl: LYRICS_ITEM.url, communityId: "ly1", by: SIGNED_IN.user.login },
+  });
+  await host.menu["publish-lyrics"]({ kind: "track", title: "Jóga", artistName: "Björk", albumTitle: "Homogenic" });
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].durationSecs, 305);
 });
 
 // How a lyrics item reads in a list (the Community tab's rows).

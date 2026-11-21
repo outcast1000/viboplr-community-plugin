@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.10.1
+- **Your own sheets are yours to publish again.** A cue sheet you imported from Viboplr Community and left unchanged was refused as "someone's shared sheet already", even when it was one you published yourself (imported back on another computer, say). Now only someone else's untouched import is refused. Yours publishes, under its own author again (the " · via @you" an import adds comes off). Imports from earlier versions are recognised by that same author label. The same goes for synced lyrics the lyrics provider found: if the sheet it found is yours, you can publish it.
+
 ## v1.10.0
 - **The assistant can publish cue sheets.** A new `publish_cue_sheet` tool does for a song's cue sheet what `publish_lyrics` does for its lyrics: it sends the sheet Viboplr has for the song (never one the assistant passes; it saves one with `cue_sheet` first), with the length of the recording it's timed to, and says why when it can't — no sheet, a sheet imported from the community and left unchanged, or a length that can't be told. Like every action tool, it needs the *Plugin actions* permission. Right-click → *Publish cue sheet…* works as before.
 

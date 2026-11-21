@@ -220,6 +220,31 @@ function importAuthor(item) {
   return label.slice(0, MAX_AUTHOR_CHARS);
 }
 
+// Whether a Community login is the signed-in member's.
+function isMe(login) {
+  return !!(login && state.user && state.user.login && login === state.user.login);
+}
+
+// The publisher an imported cue sheet came from: recorded at import (`by`),
+// or — for imports from before that — read back from the author label
+// importAuthor wrote ("@login", or "Author · via @login").
+function importedFrom(rec, row) {
+  if (rec && rec.by) return rec.by;
+  var m = /(?:^|· via )@([A-Za-z0-9-]+)$/.exec((row && row.author) || "");
+  return m ? m[1] : null;
+}
+
+// The author to publish an own sheet under after a round trip through the
+// community: importAuthor's " · via @me" (or a bare "@me") comes off again.
+function ownAuthor(author) {
+  if (typeof author !== "string") return author;
+  var me = state.user && state.user.login;
+  if (!me) return author;
+  if (author === "@" + me) return undefined;
+  var suffix = " · via @" + me;
+  return author.slice(-suffix.length) === suffix ? author.slice(0, -suffix.length) : author;
+}
+
 function plural(n, one, many) {
   return n + " " + (n === 1 ? one : many);
 }
@@ -917,7 +942,7 @@ function importItem(id, confirmed, opts) {
         return api.cues
           .set(item.title, item.artistName, item.payload, meta)
           .then(function (row) {
-            state.imports[key] = { id: item.id, version: item.version, updatedAt: row.updatedAt };
+            state.imports[key] = { id: item.id, version: item.version, updatedAt: row.updatedAt, by: (item.publisher && item.publisher.login) || null };
             return api ? api.storage.set("imports", state.imports) : null;
           })
           .then(function () {
@@ -1075,8 +1100,12 @@ function publishCuesCore(title, artist) {
   return api.cues.get(title, artist).then(function (row) {
     if (!row) return { status: "no-sheet" };
     var rec = state.imports[songKey(row.title, row.artistName)];
-    // An import left as it came is someone's shared sheet already.
-    if (rec && rec.updatedAt === row.updatedAt) return { status: "from-community", title: row.title };
+    // An import left as it came is someone else's shared sheet already. One
+    // the member published themselves (imported back, say, on another
+    // computer) is still theirs to publish.
+    var untouched = rec && rec.updatedAt === row.updatedAt;
+    var mine = untouched && isMe(importedFrom(rec, row));
+    if (untouched && !mine) return { status: "from-community", title: row.title };
     return Promise.all([
       albumFor(row.title, row.artistName, row.albumName),
       songLength(row.title, row.artistName, row.albumName, row.durationSecs),
@@ -1094,7 +1123,7 @@ function publishCuesCore(title, artist) {
             albumName: found.album || undefined,
             albumArtistName: found.albumArtist || undefined,
             durationSecs: got[1],
-            author: row.author,
+            author: mine ? ownAuthor(row.author) : row.author,
             sheet: row.sheet,
           },
           true
@@ -1390,7 +1419,8 @@ function publishLyricsCore(title, artist, album) {
     if (value.kind !== "synced") return { status: "plain-only" };
     // Lyrics this provider put in place are someone's shared sheet already:
     // publishing them would put a copy of it under this account.
-    if (communityIdOf(value)) return { status: "from-community", url: value._meta.homepageUrl || null };
+    // Unless the sheet the provider found is the member's own.
+    if (communityIdOf(value) && !isMe(value._meta.by)) return { status: "from-community", url: value._meta.homepageUrl || null };
     var body = { kind: "synced_lyrics", title: title, artistName: artist || undefined, lrc: value.text };
     return Promise.all([albumFor(title, artist, album), songLength(title, artist, album, null)])
       .then(function (got) {
