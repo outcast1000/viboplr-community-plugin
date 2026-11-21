@@ -1013,6 +1013,57 @@ function albumFor(title, artist, album) {
     });
 }
 
+// How far apart two lengths of a song may be and still be one recording —
+// Community's own rule for what counts as the same version of a sheet.
+var SAME_CUT_SECS = 3;
+
+// The length of the recording a sheet is timed to. Community requires it: a
+// cue sheet's or lyric sheet's timings fit one cut only, and a live take
+// needs its own. The sheet's own length when it has one, else the playing
+// copy's when it is this song, else the library's — when every copy of the
+// song it has (on the album named, if one is) is the same length. Null when
+// that can't be told: the song isn't in the library, or is there at
+// several lengths and none of them is playing.
+function songLength(title, artist, album, own) {
+  if (knownDuration(own) != null) return Promise.resolve(own);
+  var want = songKey(title, artist);
+  var now = api.playback && typeof api.playback.getCurrentTrack === "function" ? api.playback.getCurrentTrack() : null;
+  if (now && songKey(now.title, now.artist_name) === want && knownDuration(now.duration_secs) != null) {
+    return Promise.resolve(now.duration_secs);
+  }
+  if (!api.library || typeof api.library.ftsTracks !== "function") return Promise.resolve(null);
+  return api.library
+    .ftsTracks(title, { limit: 50 })
+    .then(function (rows) {
+      var hits = (rows || []).filter(function (t) {
+        return songKey(t.title, t.artist_name) === want && knownDuration(t.duration_secs) != null;
+      });
+      if (album) {
+        var onAlbum = hits.filter(function (t) {
+          return fold(t.album_title) === fold(album);
+        });
+        if (onAlbum.length) hits = onAlbum;
+      }
+      if (!hits.length) return null;
+      var lengths = hits.map(function (t) {
+        return t.duration_secs;
+      });
+      return Math.max.apply(null, lengths) - Math.min.apply(null, lengths) <= SAME_CUT_SECS ? lengths[0] : null;
+    })
+    .catch(function (e) {
+      api.log("warn", "Couldn't look up the length of “" + title + "”: " + errorText(e));
+      return null;
+    });
+}
+
+// What to say when songLength can't tell.
+function noLengthMessage(title) {
+  return (
+    "Couldn't tell which recording of “" + title + "” this is timed to: it isn't in your library, or it is there at several lengths. " +
+    "Play the copy it's timed to, then publish again."
+  );
+}
+
 function publishSong(title, artist) {
   if (!requireSignIn("publish")) return Promise.resolve();
   return api.cues
@@ -1028,7 +1079,15 @@ function publishSong(title, artist) {
         notify("This sheet came from the community unchanged, so it isn't yours to publish.");
         return;
       }
-      return albumFor(row.title, row.artistName, row.albumName).then(function (found) {
+      return Promise.all([
+        albumFor(row.title, row.artistName, row.albumName),
+        songLength(row.title, row.artistName, row.albumName, row.durationSecs),
+      ]).then(function (got) {
+        var found = got[0];
+        if (got[1] == null) {
+          notify(noLengthMessage(row.title));
+          return null;
+        }
         return request(
           "POST",
           "/v1/items",
@@ -1038,13 +1097,14 @@ function publishSong(title, artist) {
             artistName: row.artistName,
             albumName: found.album || undefined,
             albumArtistName: found.albumArtist || undefined,
-            durationSecs: row.durationSecs,
+            durationSecs: got[1],
             author: row.author,
             sheet: row.sheet,
           },
           true
         );
       }).then(function (data) {
+        if (!data) return;
         state.lastPublishedUrl = data.item.url;
         notify((data.created ? "Published “" : "Updated “") + row.title + "” on Viboplr Community.", {
           action: { label: "Open page", id: "open-last-published" },
@@ -1131,9 +1191,13 @@ function fetchSharedLyrics(entity) {
   var q = { kind: "synced_lyrics", title: entity.name };
   if (entity.artistName) q.artist = entity.artistName;
   var duration = knownDuration(entity.durationSecs);
+  // With a length, the server lists the sheets timed to this cut first and
+  // the rest under otherVersions. Its "same cut" is tighter than ours (3s,
+  // not 3%), so those stay candidates, after the ones it says fit.
+  if (duration != null) q.duration = duration;
   return request("GET", "/v1/items?" + queryString(q), undefined, false, LYRICS_LOOKUP_TIMEOUT_MS)
     .then(function (d) {
-      var pick = ((d && d.items) || []).filter(function (item) {
+      var pick = ((d && d.items) || []).concat((d && d.otherVersions) || []).filter(function (item) {
         return item && item.id && lyricsFit(item, duration);
       })[0];
       if (!pick) return { status: "not_found" };
@@ -1305,7 +1369,8 @@ function removeLyrics(key) {
 // a lyrics site, a file next to the song, an edit, an earlier import.
 // The core reports instead of toasting, so the menu item and the assistant tool
 // share it: it resolves { status: "published" | "updated", item } or
-// { status: "no-lyrics" | "plain-only" }, and rejects when it can't try or the
+// { status: "no-lyrics" | "plain-only" | "no-length" } (no-length: which
+// recording they're timed to can't be told; see songLength), and rejects when it can't try or the
 // server says no (signed out, lyrics unreadable, network, a 4xx).
 function publishLyricsCore(title, artist, album) {
   if (!state.token) return Promise.reject(requestError("Sign in with GitHub first.", 401));
@@ -1317,15 +1382,17 @@ function publishLyricsCore(title, artist, album) {
     // publishing them would put a copy of it under this account.
     if (communityIdOf(value)) return { status: "from-community", url: value._meta.homepageUrl || null };
     var body = { kind: "synced_lyrics", title: title, artistName: artist || undefined, lrc: value.text };
-    var now = api.playback && api.playback.getCurrentTrack ? api.playback.getCurrentTrack() : null;
-    if (now && songKey(now.title, now.artist_name) === songKey(title, artist) && now.duration_secs) body.durationSecs = now.duration_secs;
-    return albumFor(title, artist, album)
-      .then(function (found) {
+    return Promise.all([albumFor(title, artist, album), songLength(title, artist, album, null)])
+      .then(function (got) {
+        var found = got[0];
+        if (got[1] == null) return null;
         if (found.album) body.albumName = found.album;
         if (found.albumArtist) body.albumArtistName = found.albumArtist;
+        body.durationSecs = got[1];
         return request("POST", "/v1/items", body, true);
       })
       .then(function (data) {
+        if (!data) return { status: "no-length" };
         state.lastPublishedUrl = data.item.url;
         return { status: data.created ? "published" : "updated", item: data.item };
       });
@@ -1339,6 +1406,7 @@ function publishLyrics(title, artist, album) {
       if (out.status === "no-lyrics") notify("There are no lyrics for “" + title + "” to publish.");
       else if (out.status === "plain-only") notify("“" + title + "” only has plain lyrics. Only synced lyrics can be shared.");
       else if (out.status === "from-community") notify("The synced lyrics for “" + title + "” came from Viboplr Community already. Edit them in the app first to share your own.");
+      else if (out.status === "no-length") notify(noLengthMessage(title));
       else {
         notify((out.status === "published" ? "Published the synced lyrics for “" : "Updated the synced lyrics for “") + title + "”.", {
           action: { label: "Open page", id: "open-last-published" },
@@ -1408,6 +1476,11 @@ function publishLyricsTool(args) {
   }).then(function (out) {
     if (out.status === "no-lyrics") throw new Error("Viboplr has no lyrics for “" + title + "”. Nothing was published.");
     if (out.status === "plain-only") throw new Error("“" + title + "” only has plain lyrics in Viboplr; only synced lyrics can be shared. Nothing was published.");
+    if (out.status === "no-length") {
+      throw new Error(
+        "Viboplr Community needs the length of the recording the lyrics for “" + title + "” are timed to, and it can't be told: the song isn't in the library, or is there at several lengths. Nothing was published; ask the user to play the copy the lyrics fit, then call again."
+      );
+    }
     if (out.status === "from-community") throw new Error("The synced lyrics Viboplr shows for “" + title + "” came from Viboplr Community already" + (out.url ? " (" + out.url + ")" : "") + ". Nothing was published; to share your own, save edited lyrics for the song in Viboplr first.");
     return { status: out.status, id: out.item.id, url: out.item.url };
   });
@@ -2767,11 +2840,14 @@ function checkSharedCues(ctx) {
     .get(title, artist)
     .then(function (own) {
       if (own) return rememberCueAsked(key); // the user's own sheet always wins
-      return request("GET", "/v1/items?" + queryString({ kind: "cue_sheet", title: title, artist: artist })).then(function (data) {
+      var q = { kind: "cue_sheet", title: title, artist: artist };
+      if (knownDuration(track.duration_secs) != null) q.duration = track.duration_secs;
+      return request("GET", "/v1/items?" + queryString(q)).then(function (data) {
         if (!api || playingSongKey() !== key) return; // moved on meanwhile: ask again next time
-        // Never offer the user a sheet they published themselves.
+        // Never offer the user a sheet they published themselves. With a
+        // length the server splits off other cuts; fittingSheets judges all.
         var me = state.user && state.user.login;
-        var items = ((data && data.items) || []).filter(function (it) {
+        var items = ((data && data.items) || []).concat((data && data.otherVersions) || []).filter(function (it) {
           return !(me && it.publisher && it.publisher.login === me);
         });
         // The server lists the most imported first, newest on a tie.

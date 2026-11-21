@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.9.0
+- **Each version of a song gets its own cue sheet and synced lyrics.** A sheet's timings fit one recording, so the album cut and a live take now each have their own on Community, and publishing one no longer replaces the other. Publishing always sends the length of the recording the sheet is timed to, which Community now requires. That's the sheet's own length when it has one, else the playing copy's, else your library's when every copy you have of the song (on the album named) is the same length. When it can't be told (the song isn't in your library, or is there at several lengths), nothing is published and Viboplr asks you to play the copy the sheet fits, then publish again. The assistant's `publish_lyrics` tool says the same.
+- **Shared sheets for your copy come first.** Shared cue sheets and the lyrics provider now send the playing copy's length, so Community lists the sheets timed to that cut first. The plugin still judges every sheet itself, as before (3 seconds for cue sheets; 3 seconds or 3% for lyrics).
+
 ## v1.8.0
 - **Viboplr Community is now a lyrics provider.** When the lyrics providers ahead of it have nothing for a song, Viboplr asks Community for shared synced lyrics, and shows the most-imported sheet timed to a copy as long as yours (within 3 seconds, or 3%). It is one row in Settings → Providers → Lyrics, so you can move it up or down or switch it off. Lookups go without your account (the song's title and artist only, even when you're signed in), and nothing counts as an import. Extensions → Viboplr Community → While you listen says so too. Lyrics found this way can't be published again under your name: edit them in the app first. Importing a particular sheet from a song's Community tab works as before and still wins over every provider.
 

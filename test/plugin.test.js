@@ -360,7 +360,7 @@ test("a 401 signs the plugin out instead of failing silently", async () => {
     },
     { session: { token: "vcom_revoked", user: { login: "alice" } } }
   );
-  await host.addSheet("Song", "Band", SHEET);
+  await host.addSheet("Song", "Band", SHEET, { durationSecs: 200 });
   await host.menu["publish-cues"]({ kind: "track", title: "Song", artistName: "Band" });
   assert.equal(host.storage.get("session"), null);
   assert.equal(accountState(host), "Signed out");
@@ -773,6 +773,18 @@ test("the lyrics provider takes the sheet timed to the song's own length", async
   assert.deepEqual(await at(400), { status: "not_found" }, "no sheet fits a 6:40 live take");
 });
 
+test("the lyrics provider sends the length, and still weighs what the server calls another version", async () => {
+  // 312s is 7s off the 305s sheet: another cut to the server (3s), the same
+  // one to the provider (3%), so it is still picked.
+  const { host } = await setup((u) => {
+    if (u.pathname === "/v1/items") return { body: { items: [], otherVersions: [{ ...LYRICS_ITEM, durationSecs: 305 }] } };
+    if (u.pathname === "/v1/items/ly1") return { body: { item: { ...LYRICS_ITEM, payload: { lrc: LRC } } } };
+  });
+  const got = await host.infoProviders.lyrics({ kind: "track", name: "Jóga", artistName: "Björk", durationSecs: 312 });
+  assert.equal(got.status, "ok");
+  assert.equal(new URL(lyricLookups(host)[0].url).searchParams.get("duration"), "312");
+});
+
 test("a sheet with no recorded length is judged by its last line", async () => {
   const { host } = await setup(providerRoute([{ ...LYRICS_ITEM, id: "ly1", lastLineSecs: 200 }]));
   const at = (durationSecs) => host.infoProviders.lyrics({ kind: "track", name: "Jóga", artistName: "Björk", durationSecs });
@@ -899,10 +911,56 @@ test("publishing shares any synced lyrics the app has, from any source", async (
   assert.deepEqual(posted[0], { kind: "synced_lyrics", title: "Jóga", artistName: "Björk", albumName: "Homogenic", lrc: LRC, durationSecs: 305 });
 });
 
+test("lyrics are published with the length of the recording they fit, and not without one", async () => {
+  const posted = [];
+  const { host } = await setup(lyricsRoute(posted), { session: { token: "vcom_tok", user: { login: "alice" } } });
+  host.lyricsCache.set(JOGA_KEY, { text: LRC, kind: "synced" });
+  const publish = () => host.menu["publish-lyrics"]({ kind: "track", title: "Jóga", artistName: "Björk", albumTitle: "Homogenic" });
+  const joga = { title: "Jóga", artist_name: "Björk", album_title: "Homogenic", duration_secs: 305 };
+
+  await publish();
+  assert.equal(posted.length, 0, "not in the library, not playing: no length");
+  assert.match(host.lastNotice().message, /Couldn't tell which recording of “Jóga”.*Play the copy/);
+
+  host.libraryTracks.push(joga, { ...joga, album_title: "Live", duration_secs: 390 });
+  await publish();
+  assert.equal(posted.length, 1, "the album named picks the copy");
+  assert.equal(posted[0].durationSecs, 305);
+
+  host.libraryTracks.push({ ...joga, duration_secs: 280 });
+  await publish();
+  assert.equal(posted.length, 1, "two lengths on that album: no guess");
+  assert.match(host.lastNotice().message, /Couldn't tell/);
+
+  host.current = { ...joga, duration_secs: 280 };
+  await publish();
+  assert.equal(posted.at(-1).durationSecs, 280, "the playing copy settles it");
+});
+
+test("a cue sheet with no length of its own takes the library's, and isn't published without one", async () => {
+  const posts = [];
+  const { host } = await setup(
+    (u, init) => {
+      if (u.pathname === "/v1/items" && init.method === "POST") {
+        posts.push(JSON.parse(init.body));
+        return { status: 201, body: { item: { ...ITEM, id: "new1" }, created: true } };
+      }
+    },
+    { session: { token: "vcom_tok", user: { login: "alice" } } }
+  );
+  await host.addSheet("Jóga", "Björk", SHEET);
+  await host.menu["publish-cues"]({ kind: "track", title: "Jóga", artistName: "Björk" });
+  assert.equal(posts.length, 0);
+  assert.match(host.lastNotice().message, /Couldn't tell which recording/);
+  host.libraryTracks.push({ title: "Jóga", artist_name: "Björk", album_title: "Homogenic", duration_secs: 304.6 });
+  await host.menu["publish-cues"]({ kind: "track", title: "Jóga", artistName: "Björk" });
+  assert.equal(posts[0].durationSecs, 304.6);
+});
+
 test("the assistant's publish_lyrics tool reports the outcome and uses the library's spelling", async () => {
   const posted = [];
   const { host } = await setup(lyricsRoute(posted), { session: { token: "vcom_tok", user: { login: "alice" } } });
-  host.libraryTracks.push({ title: "Jóga", artist_name: "Björk", album_title: "Homogenic" });
+  host.libraryTracks.push({ title: "Jóga", artist_name: "Björk", album_title: "Homogenic", duration_secs: 305 });
   const tool = host.tools.publish_lyrics;
   assert.equal(typeof tool, "function");
 
@@ -923,6 +981,7 @@ test("the assistant's publish_lyrics tool reports the outcome and uses the libra
   assert.equal(posted[0].title, "Jóga");
   assert.equal(posted[0].artistName, "Björk");
   assert.equal(posted[0].albumName, "Homogenic");
+  assert.equal(posted[0].durationSecs, 305, "not playing: the library's length");
   assert.ok(host.infoReads.length > 0 && host.infoReads.every((r) => r.entity.name === "Jóga" && r.entity.artistName === "Björk"));
   // Lyrics the app already had are never fetched again.
   assert.equal(host.infoFetches.length, 0);

@@ -53,6 +53,7 @@ test("Now Playing on screen, no sheet of yours: one anonymous lookup and a toast
   const { plugin, host, lookups } = await setup();
   assert.equal(lookups().length, 1);
   assert.ok(!((lookups()[0].init && lookups()[0].init.headers) || {}).Authorization, "asked without the token");
+  assert.equal(new URL(lookups()[0].url).searchParams.get("duration"), "305", "the server puts sheets for this cut first");
   const notice = host.notices.find((n) => /cue sheet by @bob is shared/.test(n.message));
   assert.ok(notice, "offered");
   assert.equal(notice.options.action.id, "import-suggested-cue");

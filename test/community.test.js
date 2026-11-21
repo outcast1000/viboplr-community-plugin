@@ -413,7 +413,7 @@ test("songs looked up as they play are asked anonymously; only the Community tab
 test("a compilation track is published under its album artist", async () => {
   const { host } = await setup({ session: SIGNED_IN });
   host.libraryTracks = [{ id: 1, title: "Jóga", artist_name: "Björk", album_title: "Gling-Gló", album_artist_name: "Various Artists" }];
-  await host.addSheet("Jóga", "Björk", { cues: [{ at: 1, text: "hi" }] }, { albumName: "Gling-Gló" });
+  await host.addSheet("Jóga", "Björk", { cues: [{ at: 1, text: "hi" }] }, { albumName: "Gling-Gló", durationSecs: 305 });
   await host.menu["publish-cues"]({ kind: "track", title: "Jóga", artistName: "Björk" });
   const post = host.requests.find((r) => r.init.method === "POST" && new URL(r.url).pathname === "/v1/items");
   const body = JSON.parse(post.init.body);
@@ -425,7 +425,7 @@ test("a sheet that names no album is published under the library's album, unless
   const published = async (library) => {
     const { host } = await setup({ session: SIGNED_IN });
     host.libraryTracks = library;
-    await host.addSheet("The Eternal", "Joy Division", { cues: [{ at: 1, text: "hi" }] });
+    await host.addSheet("The Eternal", "Joy Division", { cues: [{ at: 1, text: "hi" }] }, { durationSecs: 366 });
     await host.menu["publish-cues"]({ kind: "track", title: "The Eternal", artistName: "Joy Division" });
     const post = host.requests.find((r) => r.init.method === "POST" && new URL(r.url).pathname === "/v1/items");
     return JSON.parse(post.init.body);
