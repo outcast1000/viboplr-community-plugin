@@ -54,36 +54,68 @@
         {
           "name": "get_formats",
           "description": "Format stats from Viboplr Community: how many copies members hold, by quality tier (hires / lossless / lossy / unknown), codec, sample rate and bit depth. kind=all (default) is every song; kind=track needs title (+ artistName); kind=album needs name (+ artistName, the album artist); kind=artist needs name. Returns { found, copies, members, tiers, codecs, sampleRates, bitDepths } — found=false when Community knows nothing of it.",
-          "categories": ["info"],
+          "categories": [
+            "info"
+          ],
           "readOnly": true,
           "inputSchema": {
             "type": "object",
             "properties": {
-              "kind": { "type": "string", "enum": ["all", "track", "album", "artist"], "description": "What to count; default all" },
-              "title": { "type": "string", "description": "Song title (kind=track)" },
-              "name": { "type": "string", "description": "Album or artist name (kind=album / artist)" },
-              "artistName": { "type": "string", "description": "Song artist (track) or album artist (album)" }
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "all",
+                  "track",
+                  "album",
+                  "artist"
+                ],
+                "description": "What to count; default all"
+              },
+              "title": {
+                "type": "string",
+                "description": "Song title (kind=track)"
+              },
+              "name": {
+                "type": "string",
+                "description": "Album or artist name (kind=album / artist)"
+              },
+              "artistName": {
+                "type": "string",
+                "description": "Song artist (track) or album artist (album)"
+              }
             }
           }
         },
         {
           "name": "has_waveform",
           "description": "Whether Viboplr Community has a shared seek-bar waveform for a song, and for which recording lengths. Returns { title, artistName, shared, waveforms: [{ durationSecs }] }; who shared one is never said.",
-          "categories": ["info"],
+          "categories": [
+            "info"
+          ],
           "readOnly": true,
           "inputSchema": {
             "type": "object",
             "properties": {
-              "title": { "type": "string", "description": "Song title" },
-              "artistName": { "type": "string", "description": "Song artist" }
+              "title": {
+                "type": "string",
+                "description": "Song title"
+              },
+              "artistName": {
+                "type": "string",
+                "description": "Song artist"
+              }
             },
-            "required": ["title"]
+            "required": [
+              "title"
+            ]
           }
         },
         {
           "name": "publish_lyrics",
           "description": "Publish the synced lyrics Viboplr has for a song to Viboplr Community (an update if already shared). Returns { status: \"published\" | \"updated\", id, url }. Needs the user signed in to Community; fails when the song has no synced lyrics, or when the length of the recording they fit can't be told (the song isn't in the library, or is there at several lengths and isn't playing).",
-          "categories": ["info"],
+          "categories": [
+            "info"
+          ],
           "inputSchema": {
             "type": "object",
             "properties": {
