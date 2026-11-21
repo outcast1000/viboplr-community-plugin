@@ -1064,30 +1064,26 @@ function noLengthMessage(title) {
   );
 }
 
-function publishSong(title, artist) {
-  if (!requireSignIn("publish")) return Promise.resolve();
-  return api.cues
-    .get(title, artist)
-    .then(function (row) {
-      if (!row) {
-        notify("There's no cue sheet for “" + title + "” yet.");
-        return;
-      }
-      var key = songKey(row.title, row.artistName);
-      var rec = state.imports[key];
-      if (rec && rec.updatedAt === row.updatedAt) {
-        notify("This sheet came from the community unchanged, so it isn't yours to publish.");
-        return;
-      }
-      return Promise.all([
-        albumFor(row.title, row.artistName, row.albumName),
-        songLength(row.title, row.artistName, row.albumName, row.durationSecs),
-      ]).then(function (got) {
+// Publish the song's own cue sheet. The core reports instead of toasting, so
+// the menu item and the assistant tool share it: it resolves
+// { status: "published" | "updated", item } or { status: "no-sheet" |
+// "from-community" | "no-length" } (no-length: which recording it's timed to
+// can't be told; see songLength), and rejects when it can't try or the server
+// says no (signed out, network, a 4xx).
+function publishCuesCore(title, artist) {
+  if (!state.token) return Promise.reject(requestError("Sign in with GitHub first.", 401));
+  return api.cues.get(title, artist).then(function (row) {
+    if (!row) return { status: "no-sheet" };
+    var rec = state.imports[songKey(row.title, row.artistName)];
+    // An import left as it came is someone's shared sheet already.
+    if (rec && rec.updatedAt === row.updatedAt) return { status: "from-community", title: row.title };
+    return Promise.all([
+      albumFor(row.title, row.artistName, row.albumName),
+      songLength(row.title, row.artistName, row.albumName, row.durationSecs),
+    ])
+      .then(function (got) {
         var found = got[0];
-        if (got[1] == null) {
-          notify(noLengthMessage(row.title));
-          return null;
-        }
+        if (got[1] == null) return null;
         return request(
           "POST",
           "/v1/items",
@@ -1103,13 +1099,27 @@ function publishSong(title, artist) {
           },
           true
         );
-      }).then(function (data) {
-        if (!data) return;
+      })
+      .then(function (data) {
+        if (!data) return { status: "no-length", title: row.title };
         state.lastPublishedUrl = data.item.url;
-        notify((data.created ? "Published “" : "Updated “") + row.title + "” on Viboplr Community.", {
+        return { status: data.created ? "published" : "updated", item: data.item, title: row.title };
+      });
+  });
+}
+
+function publishSong(title, artist) {
+  if (!requireSignIn("publish")) return Promise.resolve();
+  return publishCuesCore(title, artist)
+    .then(function (out) {
+      if (out.status === "no-sheet") notify("There's no cue sheet for “" + title + "” yet.");
+      else if (out.status === "from-community") notify("This sheet came from the community unchanged, so it isn't yours to publish.");
+      else if (out.status === "no-length") notify(noLengthMessage(out.title));
+      else {
+        notify((out.status === "published" ? "Published “" : "Updated “") + out.title + "” on Viboplr Community.", {
           action: { label: "Open page", id: "open-last-published" },
         });
-      });
+      }
     })
     .catch(function (e) {
       fail("Couldn't publish", e);
@@ -1484,6 +1494,38 @@ function publishLyricsTool(args) {
     if (out.status === "from-community") throw new Error("The synced lyrics Viboplr shows for “" + title + "” came from Viboplr Community already" + (out.url ? " (" + out.url + ")" : "") + ". Nothing was published; to share your own, save edited lyrics for the song in Viboplr first.");
     return { status: out.status, id: out.item.id, url: out.item.url };
   });
+}
+
+// The assistant's cue sheet publish, like publish_lyrics: it shares only the
+// sheet the song already has in Viboplr — never one the caller sends (to
+// share one you wrote, save it with cue_sheet first) — and the "Plugin
+// actions" switch gates it.
+function publishCueSheetTool(args) {
+  var title = args && typeof args.title === "string" ? args.title.trim() : "";
+  if (!title) throw new Error("title is required.");
+  var artist = args && typeof args.artistName === "string" && args.artistName.trim() ? args.artistName.trim() : null;
+  if (!state.token) {
+    throw new Error(
+      "Not signed in to Viboplr Community. Ask the user to sign in with GitHub in Extensions → Viboplr Community (or from a song's Community tab); you can't do that for them."
+    );
+  }
+  return canonicalSong(title, artist, null)
+    .then(function (song) {
+      title = song.title;
+      return publishCuesCore(song.title, song.artist);
+    })
+    .then(function (out) {
+      if (out.status === "no-sheet") throw new Error("Viboplr has no cue sheet for “" + title + "”. Nothing was published; save one with cue_sheet first.");
+      if (out.status === "from-community") {
+        throw new Error("The cue sheet for “" + title + "” was imported from Viboplr Community and is unchanged, so it isn't the user's to publish. Nothing was published.");
+      }
+      if (out.status === "no-length") {
+        throw new Error(
+          "Viboplr Community needs the length of the recording the cue sheet for “" + title + "” is timed to, and it can't be told: the sheet has none, and the song isn't in the library or is there at several lengths and isn't playing. Nothing was published; ask the user to play the copy the sheet fits, then call again."
+        );
+      }
+      return { status: out.status, id: out.item.id, url: out.item.url };
+    });
 }
 
 // Read-only assistant tools over the shared waveforms and the format stats.
@@ -3384,6 +3426,7 @@ function activate(pluginApi) {
   });
   if (api.assistant && typeof api.assistant.onTool === "function") {
     api.assistant.onTool("publish_lyrics", publishLyricsTool);
+    api.assistant.onTool("publish_cue_sheet", publishCueSheetTool);
     api.assistant.onTool("get_formats", getFormatsTool);
     api.assistant.onTool("has_waveform", hasWaveformTool);
   }

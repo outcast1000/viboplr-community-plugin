@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.10.0
+- **The assistant can publish cue sheets.** A new `publish_cue_sheet` tool does for a song's cue sheet what `publish_lyrics` does for its lyrics: it sends the sheet Viboplr has for the song (never one the assistant passes; it saves one with `cue_sheet` first), with the length of the recording it's timed to, and says why when it can't — no sheet, a sheet imported from the community and left unchanged, or a length that can't be told. Like every action tool, it needs the *Plugin actions* permission. Right-click → *Publish cue sheet…* works as before.
+
 ## v1.9.0
 - **Each version of a song gets its own cue sheet and synced lyrics.** A sheet's timings fit one recording, so the album cut and a live take now each have their own on Community, and publishing one no longer replaces the other. Publishing always sends the length of the recording the sheet is timed to, which Community now requires. That's the sheet's own length when it has one, else the playing copy's, else your library's when every copy you have of the song (on the album named) is the same length. When it can't be told (the song isn't in your library, or is there at several lengths), nothing is published and Viboplr asks you to play the copy the sheet fits, then publish again. The assistant's `publish_lyrics` tool says the same.
 - **Shared sheets for your copy come first.** Shared cue sheets and the lyrics provider now send the playing copy's length, so Community lists the sheets timed to that cut first. The plugin still judges every sheet itself, as before (3 seconds for cue sheets; 3 seconds or 3% for lyrics).

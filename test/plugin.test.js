@@ -957,6 +957,46 @@ test("a cue sheet with no length of its own takes the library's, and isn't publi
   assert.equal(posts[0].durationSecs, 304.6);
 });
 
+test("the assistant's publish_cue_sheet tool publishes the song's own sheet, with its length, and says why when it can't", async () => {
+  const posts = [];
+  const { host } = await setup(
+    (u, init) => {
+      if (u.pathname === "/v1/items" && init.method === "POST") {
+        posts.push(JSON.parse(init.body));
+        return { status: 201, body: { item: { ...ITEM, id: "new1", url: "https://community.viboplr.com/cue-sheets/new1" }, created: true } };
+      }
+    },
+    { session: SIGNED_IN }
+  );
+  const tool = host.tools.publish_cue_sheet;
+  assert.equal(typeof tool, "function");
+  const manifest = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "manifest.json"), "utf8"));
+  assert.ok(manifest.contributes.assistant.tools.some((t) => t.name === "publish_cue_sheet"), "declared for the assistant");
+
+  await assert.rejects(async () => tool({}), /title is required/);
+  await assert.rejects(() => tool({ title: "joga", artistName: "bjork" }), /no cue sheet/);
+
+  // No length on the sheet, not in the library: refused, saying why.
+  await host.addSheet("Jóga", "Björk", SHEET);
+  await assert.rejects(() => tool({ title: "Jóga", artistName: "Björk" }), /length of the recording.*play the copy/);
+  assert.equal(posts.length, 0);
+
+  // The library knows it, and its spelling wins over the caller's.
+  host.libraryTracks.push({ title: "Jóga", artist_name: "Björk", album_title: "Homogenic", duration_secs: 305 });
+  const out = await tool({ title: "joga" });
+  assert.deepEqual(out, { status: "published", id: "new1", url: "https://community.viboplr.com/cue-sheets/new1" });
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].kind, "cue_sheet");
+  assert.equal(posts[0].title, "Jóga");
+  assert.equal(posts[0].artistName, "Björk");
+  assert.equal(posts[0].durationSecs, 305);
+  assert.deepEqual(posts[0].sheet, SHEET);
+
+  // Signed out: nothing is sent.
+  const { host: signedOut } = await setup(() => undefined);
+  await assert.rejects(async () => signedOut.tools.publish_cue_sheet({ title: "Jóga" }), /Not signed in/);
+});
+
 test("the assistant's publish_lyrics tool reports the outcome and uses the library's spelling", async () => {
   const posted = [];
   const { host } = await setup(lyricsRoute(posted), { session: { token: "vcom_tok", user: { login: "alice" } } });
