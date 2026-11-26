@@ -1,4 +1,4 @@
-// The Community tab on Viboplr's own pages, and the seek-bar ticks.
+// The Community tab on Viboplr's own pages, and the settings panel.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { loadPlugin } = require("./harness/sandbox");
@@ -17,8 +17,8 @@ const flush = async (n = 5) => {
 };
 
 const SIGNED_IN = { token: "vcom_tok", user: { login: "alice" } };
-const JOGA = { id: 7, kind: "track", name: "Jóga", artistName: "Björk", counts: { cue_sheet: 1 }, likes: 3, liked: false, comments: 1, url: "https://community.viboplr.com/track/7" };
-const BJORK = { id: 2, kind: "artist", name: "Björk", counts: {}, likes: 9, comments: 0, url: "https://community.viboplr.com/artist/2" };
+const JOGA = { id: 7, kind: "track", name: "Jóga", artistName: "Björk", counts: { cue_sheet: 1 }, likes: 3, liked: false, url: "https://community.viboplr.com/track/7" };
+const BJORK = { id: 2, kind: "artist", name: "Björk", counts: {}, likes: 9, url: "https://community.viboplr.com/artist/2" };
 const SHEET_ITEM = {
   id: "abc123",
   kind: "cue_sheet",
@@ -30,7 +30,6 @@ const SHEET_ITEM = {
   url: "https://community.viboplr.com/cue-sheets/abc123",
   card: { title: "Björk — Jóga", facts: ["2 cues", "cards"], action: { label: "Open in Viboplr", link: "viboplr://x" } },
 };
-const COMMENT = { id: 11, subjectId: 7, body: "that bridge", atSecs: 161, createdAt: 0, likes: 2, liked: false, author: { login: "bob", avatarUrl: null }, url: "https://community.viboplr.com/track/7#comment-11" };
 
 // What POST /v1/plays answers; a test sets it to simulate an outage.
 const playsServer = { status: 200 };
@@ -40,7 +39,7 @@ const lyricsServer = { items: null };
 // from before dislikes (and puts it back).
 const likesServer = { ratings: true };
 
-// A community with Jóga (a cue sheet, a comment) and Björk (songs with something shared).
+// A community with Jóga (a cue sheet) and Björk (songs with something shared).
 function route(log = []) {
   return (u, init = {}) => {
     log.push([init.method || "GET", u.pathname + u.search]);
@@ -53,10 +52,6 @@ function route(log = []) {
       if (kind === "artist" && u.searchParams.get("name") === "Björk") return { body: { subject: BJORK } };
       return undefined;
     }
-    if (p === "/v1/subjects/7/comments") {
-      if (init.method === "POST") return { status: 201, body: { comment: { ...COMMENT, id: 12, body: JSON.parse(init.body).body } } };
-      return { body: { comments: u.searchParams.get("timed") ? [COMMENT] : [COMMENT], hasMore: false } };
-    }
     if (p === "/v1/plays") {
       if (playsServer.status !== 200) return { status: playsServer.status, body: { error: "nope" } };
       const n = JSON.parse(init.body).plays.length;
@@ -68,8 +63,6 @@ function route(log = []) {
       const rating = init.method === "PUT" ? JSON.parse(init.body).rating || "like" : null;
       return { body: { ...body, liked: rating === "like", rating } };
     }
-    if (p === "/v1/comments/11/like") return { body: { likes: init.method === "PUT" ? 3 : 2, liked: init.method === "PUT" } };
-    if (p === "/v1/subjects/2/comments") return { body: { comments: [], hasMore: false } };
     if (p === "/v1/subjects/2/children") return { body: { tracks: [JOGA], albums: [] } };
     if (p === "/v1/subjects/7") return { body: { subject: JOGA } };
     if (p === "/v1/items" && u.searchParams.get("kind") === "cue_sheet") return { body: { items: [SHEET_ITEM] } };
@@ -83,7 +76,6 @@ async function setup(opts = {}) {
   const log = [];
   const host = makeHost({ route: route(log), ...opts });
   if (opts.session) host.storage.set("session", opts.session);
-  if (opts.ticks) host.storage.set("ticks", true);
   if (opts.syncLikes !== undefined) host.storage.set("syncLikes", opts.syncLikes);
   if (opts.beforeActivate) opts.beforeActivate(host);
   await plugin.activate(host.api);
@@ -97,7 +89,7 @@ test("a song row on an artist's tab opens the song's page on its Community tab",
   const { host } = await setup();
   const tree = (await tab(host, "artist", { kind: "artist", name: "Björk" })).value;
   const song = nodes(tree, "track-row-list").flatMap((l) => l.items).find((i) => i.title === "Jóga");
-  assert.equal(song.subtitle, "Song · Björk · 1 cue sheet · 1 comment · ♥ 3");
+  assert.equal(song.subtitle, "Song · Björk · 1 cue sheet · ♥ 3");
   await host.actions["open-subject"]({ itemId: song.id });
   assert.deepEqual(host.entityOpens.at(-1), ["track", { name: "Jóga", artistName: "Björk" }, { tab: "community_track" }]);
   // An older app without navigateToEntity: the page opens, without the tab.
@@ -126,7 +118,7 @@ test("no view of its own: a settings panel, and what you shared is on the websit
   assert.equal(host.actions["publish-queue"], undefined, "only saved playlists are published");
 });
 
-test("the song's Community tab: its likes, the cue sheets to import, and comments", async () => {
+test("the song's Community tab: its likes and the cue sheets to import", async () => {
   const { host } = await setup({ session: SIGNED_IN });
   const out = await tab(host, "track", joga);
   assert.equal(out.status, "ok");
@@ -135,13 +127,11 @@ test("the song's Community tab: its likes, the cue sheets to import, and comment
   assert.ok(nodes(tree, "text").some((t) => t.content === "♥ 3 on Community"));
   assert.equal(host.actions["tab-like"], undefined, "no second heart");
   const sections = nodes(tree, "section").map((s) => s.title);
-  assert.deepEqual(sections, ["Cue sheets · 1", "Comments · 1"]);
+  assert.deepEqual(sections, ["Cue sheets · 1"]);
   const sheetRow = nodes(nodes(tree, "section")[0], "track-row-list")[0].items[0];
   assert.deepEqual(sheetRow.actions, ["tab-import", "page"]);
-  const comment = nodes(nodes(tree, "section")[1], "track-row-list")[0].items[0];
-  assert.equal(comment.title, "that bridge");
-  assert.match(comment.subtitle, /^@bob · at 2:41 · .* · ♥ 2$/);
-  assert.deepEqual(comment.actions, ["tab-comment-like", "tab-comment-report"]);
+  assert.equal(nodes(tree, "search-input").length, 0, "no comment box");
+  assert.ok(!Object.keys(host.actions).some((a) => a.startsWith("tab-comment")), "no comment actions");
 
   // A like made with the app's heart reaches Community, and the open tab follows.
   await host.likeChanged({ kind: "track", name: "Jóga", artistName: "Björk", albumTitle: null, albumArtistName: null, liked: 1, previous: 0 });
@@ -179,26 +169,11 @@ test("the tab knows what you shared already: your rows say so, and publishing ag
   }
 });
 
-test("a comment can be pinned to where the song is now", async () => {
-  const { host, log } = await setup({ session: SIGNED_IN, current: { key: "q:1", title: "Jóga", artist_name: "Björk" } });
-  host.position = 161.7;
-  const tree = (await tab(host, "track", joga)).value;
-  assert.ok(nodes(tree, "button").some((b) => b.action === "tab-comment-at" && b.label === "@ 2:41"));
-  await host.actions["tab-comment-at"]({ entity: joga });
-  assert.ok(nodes(host.sectionData.at(-1).data, "button").some((b) => b.label === "at 2:41 ✕"));
-  await host.actions["tab-comment"]({ entity: joga, query: "  here  " });
-  const post = log.find(([m, path]) => m === "POST" && path === "/v1/subjects/7/comments");
-  assert.ok(post, "posted");
-  const body = JSON.parse(host.requests.find((r) => r.init.method === "POST" && r.url.endsWith("/comments")).init.body);
-  assert.deepEqual(body, { body: "here", atSecs: 161 });
-});
-
-test("signed out, the tab invites a sign-in instead of a composer", async () => {
+test("signed out, the song's tab invites a sign-in", async () => {
   const { host } = await setup();
   const tree = (await tab(host, "track", joga)).value;
   assert.ok(nodes(tree, "button").some((b) => b.action === "tab-sign-in"));
   assert.ok(nodes(tree, "text").some((t) => t.content === "♥ 3 on Community"), "the count shows signed out too");
-  assert.equal(nodes(tree, "search-input").length, 0);
 });
 
 test("something nobody shared about still gets a tab, inviting the first share", async () => {
@@ -380,7 +355,7 @@ test("the settings panel holds the account and every switch", async () => {
   const { host } = await setup({ session: SIGNED_IN, appVersion: "1.0.103" });
   const toggles = nodes(host.lastView(), "toggle").map((t) => t.action);
   assert.ok(toggles.includes("toggle-sync-likes"));
-  assert.ok(toggles.includes("toggle-ticks"));
+  assert.ok(!toggles.includes("toggle-ticks"), "no seek-bar ticks: comments are gone");
   const rows = nodes(host.lastView(), "settings-row");
   assert.ok(rows.some((r) => r.label === "Signed in as @alice" && r.control.action === "sign-out"));
   // It is the Extensions page already: no button to open it.
@@ -414,30 +389,12 @@ test("an artist's tab lists its songs with something shared, and has no image ga
   assert.ok(!log.some(([, p]) => p.includes("/images")), "no images are asked for");
 });
 
-test("seek-bar ticks are off until switched on, then show the playing song's timed comments", async () => {
-  const track = { key: "q:5", title: "Jóga", artist_name: "Björk" };
-  const { host, log } = await setup({ current: track });
-  host.trackStarted(track);
-  await flush();
-  assert.equal(log.filter(([, p]) => p.includes("/comments")).length, 0, "nothing asked while off");
-  const toggle = nodes(host.lastView(), "toggle").find((t) => t.action === "toggle-ticks");
-  assert.equal(toggle.checked, false);
-  await host.actions["toggle-ticks"]({ value: true });
-  await flush();
-  assert.equal(host.storage.get("ticks"), true);
-  assert.deepEqual(host.markers.at(-1), { trackKey: "q:5", markers: [{ at: 161, label: "@bob: that bridge" }] });
-  await host.actions["toggle-ticks"]({ value: false });
-  assert.deepEqual(host.markers.at(-1), { trackKey: "q:5", markers: [] });
-});
-
-test("songs looked up as they play are asked anonymously; only the Community tab asks as you", async () => {
-  const track = { key: "q:5", title: "Jóga", artist_name: "Björk" };
-  const { host } = await setup({ session: SIGNED_IN, current: track, ticks: true });
-  host.trackStarted(track);
-  await flush();
+test("songs looked up for the header line are asked anonymously; only the Community tab asks as you", async () => {
+  const { host } = await setup({ session: SIGNED_IN });
   const resolves = () => host.requests.filter((r) => new URL(r.url).pathname === "/v1/subjects/resolve");
-  assert.ok(resolves().length > 0, "the ticks looked the song up");
-  assert.ok(resolves().every((r) => !r.init.headers.Authorization), "no token while playing");
+  await host.infoProviders.community_shared({ id: 0, kind: "track", name: "Jóga", artistName: "Björk" });
+  assert.ok(resolves().length > 0, "the header line looked the song up");
+  assert.ok(resolves().every((r) => !r.init.headers.Authorization), "no token for the header line");
   await tab(host, "track", joga);
   assert.equal(resolves().at(-1).init.headers.Authorization, "Bearer vcom_tok", "the tab shows whether you like it");
 });
@@ -506,13 +463,9 @@ test("the header line leads with the likes", async () => {
 // for a tab this plugin never loaded.
 test("a tab the host drew from its cache still acts: its buttons load what they need", async () => {
   const { host, log } = await setup({ session: SIGNED_IN });
-  await host.actions["tab-comment-like"]({ entity: joga, itemId: "comment:11" });
-  assert.ok(log.some(([m, p]) => m === "PUT" && p === "/v1/comments/11/like"), "liked the comment");
-  assert.ok(host.sectionData.length > 0, "redrawn");
-
-  const fresh = await setup({ session: SIGNED_IN });
-  await fresh.host.actions["tab-comment"]({ entity: joga, query: "hello" });
-  assert.ok(fresh.log.some(([m, p]) => m === "POST" && p === "/v1/subjects/7/comments"), "posted, not dropped");
+  await host.actions["tab-cancel-confirm"]({ entity: joga });
+  assert.ok(log.some(([, p]) => p.startsWith("/v1/subjects/resolve")), "the tab was loaded");
+  assert.equal(host.sectionData.at(-1).typeId, "community_track", "and redrawn");
 
   const page = await setup();
   await page.host.actions["tab-page"]({ entity: joga });
@@ -527,7 +480,6 @@ test("signing out redraws the open tabs as signed out", async () => {
   const redraw = host.sectionData.at(-1);
   assert.equal(redraw.typeId, "community_track");
   assert.ok(nodes(redraw.data, "button").some((b) => b.action === "tab-sign-in"), "invites a sign-in");
-  assert.equal(nodes(redraw.data, "search-input").length, 0, "no comment box");
 });
 
 test("importing lyrics from the tab over the song's own synced lyrics asks first, in the tab", async () => {
@@ -567,86 +519,4 @@ test("importing lyrics from the tab over the song's own synced lyrics asks first
   await flush(10);
   assert.equal(host.lyricsSaves.at(-1).lyrics.text, "[00:01.00]theirs");
   assert.ok(undo(), "the tab was redrawn with Undo");
-});
-
-test("switching the ticks off while they load leaves the bar clear", async () => {
-  const track = { key: "q:5", title: "Jóga", artist_name: "Björk" };
-  let release;
-  const held = new Promise((r) => (release = r));
-  const base = route();
-  const { host } = await setup({
-    current: track,
-    route: async (u, init) => {
-      if (u.pathname === "/v1/subjects/7/comments") await held;
-      return base(u, init);
-    },
-  });
-  const on = host.actions["toggle-ticks"]({ value: true });
-  await flush();
-  await host.actions["toggle-ticks"]({ value: false });
-  release();
-  await on;
-  await flush();
-  assert.deepEqual(host.markers.at(-1), { trackKey: "q:5", markers: [] }, "the late answer drew nothing");
-});
-
-test("ticks show for the song already playing when the plugin starts, asked once", async () => {
-  const track = { key: "q:5", title: "Jóga", artist_name: "Björk" };
-  const { host, log } = await setup({ current: track, ticks: true });
-  await flush();
-  assert.deepEqual(host.markers.at(-1), { trackKey: "q:5", markers: [{ at: 161, label: "@bob: that bridge" }] });
-  host.trackStarted(track);
-  await flush();
-  assert.equal(log.filter(([, p]) => p.startsWith("/v1/subjects/7/comments")).length, 1, "the start event didn't ask again");
-});
-
-test("a timed comment posted on the playing song shows on the bar at once", async () => {
-  const track = { key: "q:5", title: "Jóga", artist_name: "Björk" };
-  const comments = [];
-  const base = route();
-  const { host } = await setup({
-    session: SIGNED_IN,
-    current: track,
-    ticks: true,
-    route: (u, init = {}) => {
-      if (u.pathname === "/v1/subjects/resolve") return { body: { subject: { ...JOGA, comments: comments.length } } };
-      if (u.pathname === "/v1/subjects/7/comments") {
-        if (init.method === "POST") {
-          const b = JSON.parse(init.body);
-          const c = { ...COMMENT, id: 20 + comments.length, body: b.body, atSecs: b.atSecs ?? null, author: { login: "alice", avatarUrl: null } };
-          comments.push(c);
-          return { status: 201, body: { comment: c } };
-        }
-        return { body: { comments, hasMore: false } };
-      }
-      return base(u, init);
-    },
-  });
-  await flush();
-  assert.deepEqual(host.markers.at(-1), { trackKey: "q:5", markers: [] }, "nothing timed yet");
-  host.position = 42;
-  await tab(host, "track", joga);
-  await host.actions["tab-comment-at"]({ entity: joga });
-  await host.actions["tab-comment"]({ entity: joga, query: "the drop" });
-  await flush();
-  assert.deepEqual(host.markers.at(-1), { trackKey: "q:5", markers: [{ at: 42, label: "@alice: the drop" }] });
-});
-
-test("the comment box empties after a post, and keeps the text when the post fails", async () => {
-  let fail = false;
-  const base = route();
-  const { host } = await setup({
-    session: SIGNED_IN,
-    route: (u, init = {}) => (fail && init.method === "POST" ? { status: 500, body: { error: "down" } } : base(u, init)),
-  });
-  const box = (tree) => nodes(tree, "search-input")[0];
-  const before = box((await tab(host, "track", joga)).value).stateKey;
-  await host.actions["tab-comment"]({ entity: joga, query: "first" });
-  const after = box(host.sectionData.at(-1).data).stateKey;
-  assert.notEqual(after, before, "a new key: the posted text is gone");
-
-  fail = true;
-  const redraws = host.sectionData.length;
-  await host.actions["tab-comment"]({ entity: joga, query: "second" });
-  assert.equal(host.sectionData.length, redraws, "a failed post doesn't redraw the box away");
 });

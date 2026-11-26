@@ -47,12 +47,11 @@
 //    fit the song's length. And an IMPORT is still a one-off write, for picking
 //    a particular sheet on the Community tab: api.lyrics.save, like an edit in
 //    the app, so it outranks whatever any provider answers later.
-//  - MUSIC LIVES ON VIBOPLR'S OWN PAGES. Cue sheets, synced lyrics, likes
-//    and comments about a song, album or artist are a "Community" tab on
-//    that page (a `plugin_view` information type).
+//  - MUSIC LIVES ON VIBOPLR'S OWN PAGES. Cue sheets, synced lyrics and likes
+//    about a song, album or artist are a "Community" tab on that page (a
+//    `plugin_view` information type).
 //  - NOTHING IS ASKED WHILE MUSIC PLAYS unless the user switched it on: the
-//    Now Playing item and the seek-bar ticks (timed comments) both name every
-//    song played to the server, so both start off.
+//    Now Playing item names every song played to the server, so it starts off.
 //    Two exceptions, both on by default and both described in the settings
 //    panel. SHARED SYNCED LYRICS: the plugin is a lyrics provider, and Now
 //    Playing fetches lyrics for what plays, so a song no provider ahead of it
@@ -107,18 +106,13 @@ function freshState() {
     // What can be shared (GET /v1/modules); BUILTIN_MODULES until it answers.
     modules: BUILTIN_MODULES.slice(),
     // Subjects as the server last described them: by id (for opening one) and
-    // a one-minute cache of lookups by name (resolveSubject). The header line,
-    // the mini player item and the ticks share its anonymous entries; the tab
+    // a one-minute cache of lookups by name (resolveSubject). The header line
+    // and the mini player item share its anonymous entries; the tab
     // always asks again, as the member, and caches that apart.
     subjectsById: {},
     subjectLookups: {},
     // The Community tab's data per page, by tabKey(entity).
     tabs: {},
-    // Seek-bar ticks for the playing song's timed comments. Off by default:
-    // with them on, every song played is named to the server.
-    ticks: false,
-    // The track whose ticks were last asked for, so it's asked once.
-    ticksKey: null,
     // Send the likes made in the app to Community. On by default (owner
     // decision, 2026-10-11): only an explicit switch-off is stored as false.
     syncLikes: true,
@@ -155,8 +149,6 @@ function freshState() {
     // only on a Viboplr that doesn't own scrobbling (hostOwnsScrobbling).
     scrobble: false,
     playQueue: [],
-    // Comments posted from a tab this session: the comment box's stateKey.
-    commentsPosted: 0,
     // --- cue sheets ---
     // songKey → { id, version, updatedAt } for sheets imported from the community.
     imports: {},
@@ -800,8 +792,8 @@ function lookupKey(kind, name, artist) {
 // in flight too: a page open asks for its header line and its Community tab at
 // once.
 //
-// Anonymous unless `asMember`: the header line, the Now Playing item and the
-// seek-bar ticks look songs up as they play, and with a token attached the
+// Anonymous unless `asMember`: the header line and the Now Playing item look
+// songs up as they play, and with a token attached the
 // server could tie every song played to the signed-in account. Only the
 // Community tab — which the user opened, and which shows whether they like it —
 // asks as a member. The two are cached apart, since only one carries `liked`.
@@ -2013,20 +2005,11 @@ function openSubjectLink(id) {
 
 var KIND_LABELS = { track: "Song", album: "Album", artist: "Artist" };
 
-function ago(ts) {
-  var d = Math.max(0, Math.floor(Date.now() / 1000) - Number(ts || 0));
-  if (d < 60) return "just now";
-  if (d < 3600) return Math.floor(d / 60) + " min";
-  if (d < 86400) return Math.floor(d / 3600) + " h";
-  return Math.floor(d / 86400) + " d";
-}
-
-// "2 cue sheets · 3 comments · ♥ 12" for a subject.
+// "2 cue sheets · ♥ 12" for a subject.
 function subjectFacts(s) {
   var bits = countParts(s.counts).map(function (p) {
     return p.n + " " + p.noun;
   });
-  if (s.comments) bits.push(plural(s.comments, "comment", "comments"));
   if (s.likes) bits.push("♥ " + s.likes);
   return bits;
 }
@@ -2073,16 +2056,8 @@ function rowsNode(items, actions) {
 //
 // A `plugin_view` information type: the page's tab is drawn from the tree this
 // returns, and its buttons reach the ACTIONS below with the page's entity in the
-// payload. After a like or a post the tab is redrawn in place with
+// payload. After an import or a publish the tab is redrawn in place with
 // api.informationTypes.setSectionData — no refetch of the whole page.
-
-var COMMENT_ACTIONS = [
-  { id: "tab-comment-like", label: "Like" },
-  { id: "tab-comment-unlike", label: "Unlike" },
-  { id: "tab-comment-delete", label: "Delete" },
-  { id: "tab-comment-report", label: "Report" },
-];
-var ACTION_ICONS_TAB = { "tab-comment-like": "♡", "tab-comment-unlike": "♥", "tab-comment-delete": "✕", "tab-comment-report": "⚑" };
 
 function tabKey(entity) {
   return entity.kind + ":" + (entity.kind === "artist" ? "" : fold(entity.artistName)) + ":" + fold(entity.name);
@@ -2122,38 +2097,17 @@ function withTab(p, run) {
   );
 }
 
-function fmtMoment(secs) {
-  var s = Math.max(0, Math.floor(Number(secs) || 0));
-  var h = Math.floor(s / 3600);
-  var m = Math.floor((s % 3600) / 60);
-  var r = s % 60;
-  var mm = h ? (m < 10 ? "0" : "") + m : String(m);
-  return (h ? h + ":" : "") + mm + ":" + (r < 10 ? "0" : "") + r;
-}
-
-// The playing track, when it is the song this tab is about.
-function playingHere(entity) {
-  if (!entity || entity.kind !== "track" || !api.playback || typeof api.playback.getCurrentTrack !== "function") return null;
-  var t = api.playback.getCurrentTrack();
-  return t && songKey(t.title, t.artist_name) === songKey(entity.name, entity.artistName) ? t : null;
-}
-
 // Everything the tab shows, fetched together. A subject nobody ever shared
 // anything about is null: the tab still shows, inviting the first share.
 function loadTabData(entity) {
-  var key = tabKey(entity);
-  var prev = state.tabs[key];
   return resolveSubject(entity.kind, entity.name, entity.artistName, true, true).then(function (subject) {
     var data = {
       entity: entity,
       subject: subject,
       cues: null,
       lyrics: null,
-      comments: [],
-      commentsMore: false,
       children: null,
       localSheet: false,
-      at: prev ? prev.at : null,
       confirm: null,
       fetchedAt: Date.now(),
     };
@@ -2176,12 +2130,6 @@ function loadTabData(entity) {
       return data;
     });
     var id = encodeURIComponent(subject.id);
-    loads.push(
-      request("GET", "/v1/subjects/" + id + "/comments", undefined, !!state.token).then(function (d) {
-        data.comments = d.comments || [];
-        data.commentsMore = !!d.hasMore;
-      })
-    );
     if (entity.kind === "track") {
       var q = { title: entity.name, artist: entity.artistName };
       if ((subject.counts || {}).cue_sheet) {
@@ -2221,76 +2169,6 @@ function likeCount(subject) {
   if (!subject) return null;
   var text = "♥ " + (subject.likes || 0) + " on Community" + (subject.liked ? " · you like it" : "");
   return { type: "text", className: "ds-muted", content: text };
-}
-
-function commentRows(data) {
-  var me = state.user && state.user.login;
-  return data.comments.map(function (c) {
-    var bits = ["@" + c.author.login];
-    if (c.atSecs !== null && c.atSecs !== undefined) bits.push("at " + fmtMoment(c.atSecs));
-    bits.push(ago(c.createdAt));
-    if (c.likes) bits.push("♥ " + c.likes);
-    var actions = [];
-    if (state.token) actions.push(c.liked ? "tab-comment-unlike" : "tab-comment-like");
-    actions.push(me && c.author.login === me ? "tab-comment-delete" : "tab-comment-report");
-    return {
-      id: "comment:" + c.id,
-      title: c.body,
-      subtitle: bits.join(" · "),
-      imageUrl: c.author.avatarUrl || undefined,
-      actions: actions,
-    };
-  });
-}
-
-function commentNodes(data) {
-  var e = data.entity;
-  var nodes = [];
-  if (!data.subject) return nodes;
-  if (state.token) {
-    // A new stateKey after each post empties the box (the host keeps typed
-    // text per key, and reads `value` only for a key it hasn't seen). A count
-    // that only grows, so a deleted comment can't bring an old key — and the
-    // text kept under it — back.
-    var composer = [
-      {
-        type: "search-input",
-        placeholder: "Comment on " + e.name,
-        action: "tab-comment",
-        value: "",
-        stateKey: "comment:" + state.commentsPosted,
-        submitOnly: true,
-        buttonLabel: "Post",
-      },
-    ];
-    if (e.kind === "track") {
-      var here = playingHere(e);
-      if (data.at !== null && data.at !== undefined) {
-        composer.push({ type: "button", label: "at " + fmtMoment(data.at) + " ✕", action: "tab-comment-at", variant: "accent" });
-      } else if (here) {
-        var pos = typeof api.playback.getPosition === "function" ? api.playback.getPosition() : 0;
-        composer.push({ type: "button", label: "@ " + fmtMoment(pos), action: "tab-comment-at", variant: "secondary" });
-      }
-    }
-    nodes.push({ type: "layout", direction: "horizontal", children: composer });
-  } else {
-    nodes.push(banner("Sign in with GitHub to comment and like.", "muted", [{ type: "button", label: "Sign in", action: "tab-sign-in", variant: "accent" }]));
-  }
-  if (!data.comments.length) nodes.push({ type: "text", content: "No comments yet.", className: "ds-muted" });
-  else {
-    nodes.push({
-      type: "track-row-list",
-      selectable: true,
-      selectionMode: "single",
-      contextMenu: false,
-      actions: COMMENT_ACTIONS.map(function (a) {
-        return Object.assign({}, a, { icon: ACTION_ICONS_TAB[a.id] });
-      }),
-      items: commentRows(data),
-    });
-    if (data.commentsMore) nodes.push({ type: "button", label: "More comments on the website", action: "tab-page", variant: "secondary" });
-  }
-  return nodes;
 }
 
 // A shared item list in the tab: the module's own row (Imported / Update
@@ -2358,12 +2236,13 @@ function tabTree(data) {
       type: "text",
       content:
         "Nothing on Viboplr Community about this " + noun + " yet." +
-        (e.kind === "track" ? " Publish your cue sheet or synced lyrics for it and it gets a page others can like and comment on." : ""),
+        (e.kind === "track" ? " Publish your cue sheet or synced lyrics for it and it gets a page others can like." : ""),
     });
     if (!state.token && e.kind === "track") children.push(banner("Sign in with GitHub to share.", "muted", [{ type: "button", label: "Sign in", action: "tab-sign-in", variant: "accent" }]));
     return { type: "layout", direction: "vertical", children: children };
   }
   if (e.kind === "track") {
+    if (!state.token) children.push(banner("Sign in with GitHub to share.", "muted", [{ type: "button", label: "Sign in", action: "tab-sign-in", variant: "accent" }]));
     if (data.cues && data.cues.length) children.push({ type: "section", title: "Cue sheets · " + data.cues.length, children: [tabItems("cue_sheet", data.cues, data.localSheet)] });
     if (data.lyrics && data.lyrics.length) children.push({ type: "section", title: "Synced lyrics · " + data.lyrics.length, children: [tabItems("synced_lyrics", data.lyrics)] });
   } else {
@@ -2372,7 +2251,6 @@ function tabTree(data) {
     if (e.kind === "artist" && kids.albums && kids.albums.length) children.push({ type: "section", title: "Albums", children: [childRows(kids.albums)] });
     if (e.kind === "artist" && kids.tracks && kids.tracks.length) children.push({ type: "section", title: "Songs with something shared", children: [childRows(kids.tracks)] });
   }
-  children.push({ type: "section", title: "Comments · " + (s.comments || data.comments.length), children: commentNodes(data) });
   return { type: "layout", direction: "vertical", children: children };
 }
 
@@ -2398,8 +2276,8 @@ function refreshTab(entity, reload) {
 // asking onFetch again.
 var TAB_TTL_MS = 300 * 1000;
 
-// Signing in or out changes what every tab shows — the like button, the
-// comment box, whose comments can be deleted, `liked` itself — but the host
+// Signing in or out changes what every tab shows — the publish buttons,
+// `liked` itself — but the host
 // keeps drawing the tree it cached. So each tab the host may still be showing
 // from that cache is redrawn: from what we have after a sign-out (a signed-out
 // tree reads nothing member-only), asked again after a sign-in (only the member
@@ -2450,68 +2328,6 @@ var TAB_ACTIONS = {
   "tab-page": function (p) {
     return withTab(p, function (t) {
       return api.network.openUrl(t.subject ? t.subject.url : SERVER);
-    });
-  },
-  "tab-comment": function (p) {
-    var body = String((p && p.query) || "").trim();
-    if (!body || !requireSignIn("comment")) return Promise.resolve();
-    return withTab(p, function (t) {
-      if (!t.subject) return;
-      var payload = { body: body };
-      if (t.at !== null && t.at !== undefined) payload.atSecs = t.at;
-      return request("POST", "/v1/subjects/" + encodeURIComponent(t.subject.id) + "/comments", payload, true)
-        .then(function () {
-          t.at = null;
-          state.commentsPosted++;
-          retick(t.entity);
-          return refreshTab(t.entity, true);
-        })
-        .catch(function (e) {
-          fail("Couldn't post that comment", e);
-        });
-    });
-  },
-  // Pin the comment to where the song is now (or unpin it).
-  "tab-comment-at": function (p) {
-    return withTab(p, function (t) {
-      if (t.at !== null && t.at !== undefined) t.at = null;
-      else if (playingHere(t.entity)) t.at = Math.floor(typeof api.playback.getPosition === "function" ? api.playback.getPosition() : 0);
-      else {
-        notify("Play the song to pin a comment to a moment of it.");
-        return;
-      }
-      return refreshTab(t.entity, false);
-    });
-  },
-  "tab-comment-like": function (p) {
-    return likeComment(p, true);
-  },
-  "tab-comment-unlike": function (p) {
-    return likeComment(p, false);
-  },
-  "tab-comment-delete": function (p) {
-    var id = itemIdOf(p, "comment:");
-    if (!id) return Promise.resolve();
-    return withTab(p, function (t) {
-      return request("DELETE", "/v1/comments/" + encodeURIComponent(id), undefined, true)
-        .then(function () {
-          retick(t.entity);
-          return refreshTab(t.entity, true);
-        })
-        .catch(function (e) {
-          fail("Couldn't delete that comment", e);
-        });
-    });
-  },
-  // Reporting asks for a reason, which the website's form collects.
-  "tab-comment-report": function (p) {
-    var id = itemIdOf(p, "comment:");
-    if (!id) return Promise.resolve();
-    return withTab(p, function (t) {
-      var c = t.comments.filter(function (x) {
-        return String(x.id) === id;
-      })[0];
-      if (c) return api.network.openUrl(c.url);
     });
   },
   "tab-import": function (p) {
@@ -2591,75 +2407,6 @@ function tabImportLyrics(p) {
     }).then(function () {
       return refreshTab(t.entity, false);
     });
-  });
-}
-
-function likeComment(p, on) {
-  var id = itemIdOf(p, "comment:");
-  if (!id || !requireSignIn("like")) return Promise.resolve();
-  return withTab(p, function (t) {
-    return request(on ? "PUT" : "DELETE", "/v1/comments/" + encodeURIComponent(id) + "/like", undefined, true)
-      .then(function (d) {
-        t.comments = t.comments.map(function (c) {
-          return String(c.id) === id ? Object.assign({}, c, { likes: d.likes, liked: d.liked }) : c;
-        });
-        return refreshTab(t.entity, false);
-      })
-      .catch(function (e) {
-        fail("Couldn't like that comment", e);
-      });
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Seek-bar ticks: the playing song's timed comments
-// ---------------------------------------------------------------------------
-
-function canMark() {
-  return !!(api.playback && typeof api.playback.setMarkers === "function");
-}
-
-// The playing song's timed comments as ticks. Once per track (the start event
-// and the restore at launch can both ask); `fresh` asks again past the lookup
-// cache, after a comment changed what there is to show.
-function loadTicks(track, fresh) {
-  if (!state.ticks || !canMark() || !track || !track.title || !track.key) return Promise.resolve();
-  if (!fresh && state.ticksKey === track.key) return Promise.resolve();
-  state.ticksKey = track.key;
-  return resolveSubject("track", track.title, track.artist_name || null, !!fresh)
-    .then(function (s) {
-      if (!s || !s.comments) return [];
-      return request("GET", "/v1/subjects/" + encodeURIComponent(s.id) + "/comments?timed=1").then(function (d) {
-        return d.comments || [];
-      });
-    })
-    .then(function (comments) {
-      // Switched off while this was on its way: the bar was cleared, keep it so.
-      if (!state.ticks || !api) return;
-      api.playback.setMarkers(
-        track.key,
-        comments.map(function (c) {
-          return { at: c.atSecs, label: "@" + c.author.login + ": " + c.body };
-        })
-      );
-    })
-    .catch(function (e) {
-      api.log("warn", "Couldn't load the timed comments: " + errorText(e));
-    });
-}
-
-function currentTrack() {
-  return api.playback && typeof api.playback.getCurrentTrack === "function" ? api.playback.getCurrentTrack() : null;
-}
-
-function setTicks(on) {
-  state.ticks = !!on;
-  state.ticksKey = null;
-  var current = currentTrack();
-  return api.storage.set("ticks", state.ticks).then(function () {
-    render();
-    if (state.ticks) return loadTicks(current, true);
-    if (canMark() && current && current.key) api.playback.setMarkers(current.key, []);
   });
 }
 
@@ -2991,28 +2738,6 @@ function likeSyncNodes() {
   return nodes;
 }
 
-// A comment was posted or deleted on this tab's song: redraw its ticks if it
-// is the one playing.
-function retick(entity) {
-  var here = playingHere(entity);
-  return here ? loadTicks(here, true) : null;
-}
-
-function tickNodes() {
-  if (!canMark()) {
-    return [{ type: "text", className: "ds-muted", content: "Ticks on the seek bar need a newer Viboplr." }];
-  }
-  return [
-    {
-      type: "settings-row",
-      label: "Timed comments on the seek bar",
-      description:
-        "Ticks where people commented on a moment of the playing song; point at one to read it. While this is on, every song you play is looked up on Viboplr Community.",
-      control: { type: "toggle", label: "", action: "toggle-ticks", checked: state.ticks },
-    },
-  ];
-}
-
 // ---------------------------------------------------------------------------
 // Shared cue sheets in Now Playing
 // ---------------------------------------------------------------------------
@@ -3084,6 +2809,10 @@ function rememberCueSuggestion(key, item) {
   keys.slice(0, Math.max(0, keys.length - CUE_SUGGESTIONS_MAX)).forEach(function (k) {
     delete state.cueSuggestions[k];
   });
+}
+
+function currentTrack() {
+  return api.playback && typeof api.playback.getCurrentTrack === "function" ? api.playback.getCurrentTrack() : null;
 }
 
 function playingSongKey() {
@@ -3663,7 +3392,7 @@ function accountNodes() {
     nodes.push({
       type: "settings-row",
       label: "Signed in as @" + state.user.login,
-      description: "What you publish, like and comment on, and the plays, likes and waveforms Viboplr sends, go under this GitHub account.",
+      description: "What you publish and like, and the plays, likes and waveforms Viboplr sends, go under this GitHub account.",
       control: { type: "button", label: "Sign out", action: "sign-out", variant: "secondary" },
     });
   } else {
@@ -3671,7 +3400,7 @@ function accountNodes() {
       type: "settings-row",
       label: "Signed out",
       description:
-        "Sign in with GitHub to publish, like and comment, and to send your plays, likes and waveforms. Importing needs no account. If your browser can't hand the sign-in back to Viboplr (some company networks), sign in with a code.",
+        "Sign in with GitHub to publish and like, and to send your plays, likes and waveforms. Importing needs no account. If your browser can't hand the sign-in back to Viboplr (some company networks), sign in with a code.",
     });
     nodes.push({
       type: "layout",
@@ -3717,7 +3446,7 @@ function lyricsProviderNodes() {
 function settingsNodes() {
   return [
     { type: "section", title: "Account", children: accountNodes() },
-    { type: "section", title: "While you listen", children: lyricsProviderNodes().concat(tickNodes(), cueSuggestNodes()) },
+    { type: "section", title: "While you listen", children: lyricsProviderNodes().concat(cueSuggestNodes()) },
     { type: "section", title: "Send from Viboplr", children: scrobbleNodes().concat(likeSyncNodes()) },
     { type: "section", title: "Share with Viboplr Community", children: autoPublishNodes().concat(waveformNodes()) },
   ];
@@ -3807,9 +3536,6 @@ var ACTIONS = {
     return api.network.openUrl(pageFor(rowId(p)));
   },
   // --- settings ---
-  "toggle-ticks": function (p) {
-    return setTicks(p && p.value);
-  },
   "toggle-scrobble": function (p) {
     if (!state.token || hostOwnsScrobbling()) return Promise.resolve(render());
     return setScrobble(p && p.value);
@@ -3923,8 +3649,7 @@ function activate(pluginApi) {
   registerLyricsProvider();
   registerTabs();
   if (api.playback && typeof api.playback.onTrackStarted === "function") {
-    api.playback.onTrackStarted(function (track) {
-      loadTicks(track);
+    api.playback.onTrackStarted(function () {
       // A new song while Now Playing is already up.
       checkSharedCuesNow();
     });
@@ -3946,7 +3671,6 @@ function activate(pluginApi) {
     api.storage.get("imports"),
     api.storage.get("modules"),
     api.storage.get("lyricsImports"),
-    api.storage.get("ticks"),
     api.storage.get("syncLikes"),
     api.storage.get("playQueue"),
     api.storage.get("scrobble"),
@@ -3966,18 +3690,17 @@ function activate(pluginApi) {
     var cached = validModules(vals[2]);
     if (cached.length) state.modules = cached;
     state.lyricsImports = vals[3] || {};
-    state.ticks = vals[4] === true;
-    state.syncLikes = vals[5] !== false;
+    state.syncLikes = vals[4] !== false;
     // A play counted while storage was being read joins the saved ones.
-    state.playQueue = (Array.isArray(vals[6]) ? vals[6] : []).concat(state.playQueue);
-    state.scrobble = vals[7] === true;
-    state.shareWaveforms = vals[8] !== false;
-    state.cueSuggest = CUE_SUGGEST_MODES.indexOf(vals[9]) >= 0 ? vals[9] : "notify";
+    state.playQueue = (Array.isArray(vals[5]) ? vals[5] : []).concat(state.playQueue);
+    state.scrobble = vals[6] === true;
+    state.shareWaveforms = vals[7] !== false;
+    state.cueSuggest = CUE_SUGGEST_MODES.indexOf(vals[8]) >= 0 ? vals[8] : "notify";
     // A song checked before this run started stays checked.
-    state.cueAsked = Object.assign(vals[10] && typeof vals[10] === "object" ? vals[10] : {}, state.cueAsked);
-    state.autoPublish = vals[11] !== false;
+    state.cueAsked = Object.assign(vals[9] && typeof vals[9] === "object" ? vals[9] : {}, state.cueAsked);
+    state.autoPublish = vals[10] !== false;
     // A change heard while storage was being read joins the saved ones.
-    var savedQueue = Array.isArray(vals[12]) ? vals[12] : [];
+    var savedQueue = Array.isArray(vals[11]) ? vals[11] : [];
     var heard = state.autoQueue.map(function (j) {
       return j.key;
     });
@@ -3986,14 +3709,11 @@ function activate(pluginApi) {
         return j && j.key && heard.indexOf(j.key) < 0;
       })
       .concat(state.autoQueue);
-    state.autoSent = Object.assign(vals[13] && typeof vals[13] === "object" ? vals[13] : {}, state.autoSent);
+    state.autoSent = Object.assign(vals[12] && typeof vals[12] === "object" ? vals[12] : {}, state.autoSent);
   });
   // The waveform handlers above can be called before this lands.
   state.restored = restored;
-  // The song already playing: its start event came before the setting was
-  // read, or not at all (the plugin was enabled or updated mid-song).
   restored.then(function () {
-    if (api) loadTicks(currentTrack());
     // Now Playing may already be on screen (enabled or updated mid-song).
     if (api) checkSharedCuesNow();
     // Plays left waiting by the last run (offline, or the app closed).
