@@ -22,6 +22,8 @@ function makeHost({ route, current = null, queue = [], appVersion = "1.0.94", wa
     // id → { id, name, description, metadata, tracks }
     playlists: new Map(),
     plays: [],
+    owned: new Set(),
+    findTrackCalls: [],
     queue,
     // A small model of the host's lyrics: the user's provider chain
     // (`webLyrics`) and the one cache Now Playing reads, which
@@ -126,6 +128,12 @@ function makeHost({ route, current = null, queue = [], appVersion = "1.0.94", wa
     },
     library: {
       ftsTracks: async () => structuredClone(host.libraryTracks),
+      // The app's name match, folded like it is: host.owned holds "artist|title".
+      findTrack: async ({ title, artist }) => {
+        const fold = (s) => String(s).normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim();
+        host.findTrackCalls.push({ title, artist });
+        return host.owned.has(fold(artist) + "|" + fold(title)) ? [{ id: 1, title, artist_name: artist }] : [];
+      },
       // The test plays the app: host.likeChanged(change) is a like the user made.
       onLikeChanged: (handler) => {
         host.likeChanged = handler;

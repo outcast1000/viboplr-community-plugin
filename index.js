@@ -1631,6 +1631,148 @@ function getFormatsTool(args) {
   });
 }
 
+// my_likes: the signed-in member's own likes (or dislikes) on Community, read
+// back by name — so an installation sees what was rated on another one
+// (ratings only go app → Community).
+var MY_LIKES_PAGE = 500;
+// notInLibrary checks at most this many likes per call (each one a library
+// lookup), then hands back a cursor: one call over a large account must stay
+// within what an assistant tool call is given.
+var MY_LIKES_SCAN_WINDOW = 1000;
+
+// A positive whole number from a tool argument, else the fallback.
+function toolCount(args, key, fallback, max) {
+  var v = args && typeof args[key] === "number" && isFinite(args[key]) ? Math.floor(args[key]) : NaN;
+  if (!(v >= 1)) return fallback;
+  return max ? Math.min(v, max) : v;
+}
+
+function likeRow(kind, l) {
+  var s = (l && l.subject) || {};
+  var row = { rating: l.rating === "dislike" ? "dislike" : "like", likedAt: l.likedAt, url: s.url || null };
+  if (kind === "track") {
+    row.title = s.name;
+    row.artistName = s.artistName || null;
+    row.albumName = l.albumName || null;
+  } else {
+    row.name = s.name;
+    if (kind === "album") row.artistName = s.artistName || null;
+  }
+  return row;
+}
+
+// Whether the library has a copy, by the app's own name match (accents and
+// case folded). Any copy counts: the album isn't passed, so a song filed on a
+// compilation still reads as owned. null when it can't be told (an app before
+// api.library.findTrack, or a song with no artist).
+function ownsSong(row) {
+  if (!api.library || typeof api.library.findTrack !== "function" || !row.title || !row.artistName) {
+    return Promise.resolve(null);
+  }
+  return api.library.findTrack({ title: row.title, artist: row.artistName }).then(
+    function (copies) {
+      return Array.isArray(copies) && copies.length > 0;
+    },
+    function (e) {
+      console.error("community: library lookup failed for " + row.artistName + " – " + row.title + ":", e);
+      return null;
+    }
+  );
+}
+
+// A few lookups at a time: a scan can name thousands of songs.
+function markOwned(rows) {
+  var i = 0;
+  function worker() {
+    if (i >= rows.length) return Promise.resolve();
+    var row = rows[i++];
+    return ownsSong(row).then(function (owned) {
+      row.inLibrary = owned;
+      return worker();
+    });
+  }
+  var workers = [];
+  for (var w = 0; w < 8; w++) workers.push(worker());
+  return Promise.all(workers).then(function () {
+    return rows;
+  });
+}
+
+function fetchLikesPage(kind, rating, offset, limit) {
+  return request("GET", "/v1/me/likes?" + queryString({ kind: kind, rating: rating, offset: offset, limit: limit }), undefined, true);
+}
+
+function myLikesTool(args) {
+  var kind = toolText(args, "kind") || "track";
+  if (["track", "album", "artist"].indexOf(kind) < 0) throw new Error("kind must be one of track, album, artist.");
+  var rating = toolText(args, "rating") || "like";
+  if (["like", "dislike", "all"].indexOf(rating) < 0) throw new Error("rating must be one of like, dislike, all.");
+  var notInLibrary = !!(args && args.notInLibrary === true);
+  if (notInLibrary && kind !== "track") throw new Error("notInLibrary works for kind=track only.");
+  if (notInLibrary && rating !== "like") throw new Error("notInLibrary works for liked songs only (rating=like).");
+  var limit = toolCount(args, "limit", 100, MY_LIKES_PAGE);
+  var offset = toolCount(args, "offset", 0);
+  var cursor = toolCount(args, "cursor", 0);
+  if (!state.token) {
+    throw new Error(
+      "Not signed in to Viboplr Community. Ask the user to sign in with GitHub in Extensions → Viboplr Community; you can't do that for them."
+    );
+  }
+
+  if (!notInLibrary) {
+    return fetchLikesPage(kind, rating, offset, limit).then(function (page) {
+      var rows = (page.likes || []).map(function (l) {
+        return likeRow(kind, l);
+      });
+      var marked = kind === "track" ? markOwned(rows) : Promise.resolve(rows);
+      return marked.then(function (likes) {
+        return { kind: kind, rating: rating, total: page.total, offset: offset, hasMore: !!page.hasMore, likes: likes };
+      });
+    });
+  }
+
+  // One window of the like list from `cursor` (a position in the newest-first
+  // list), then only what the library lacks in it. The next call goes on
+  // from `nextCursor`; paging the filtered list by the server's offset would
+  // mean nothing.
+  var batch = [];
+  function scan(at) {
+    var want = Math.min(MY_LIKES_PAGE, MY_LIKES_SCAN_WINDOW - batch.length);
+    return fetchLikesPage(kind, "like", at, want).then(function (page) {
+      var got = page.likes || [];
+      got.forEach(function (l) {
+        batch.push(likeRow(kind, l));
+      });
+      var more = !!page.hasMore && got.length > 0;
+      if (more && batch.length < MY_LIKES_SCAN_WINDOW) return scan(at + got.length);
+      return { total: page.total, more: more };
+    });
+  }
+  return scan(cursor).then(function (scanned) {
+    return markOwned(batch).then(function (rows) {
+      var missing = rows.filter(function (r) {
+        return r.inLibrary === false;
+      });
+      var unknown = rows.filter(function (r) {
+        return r.inLibrary === null;
+      }).length;
+      var next = scanned.more ? cursor + rows.length : null;
+      return {
+        kind: kind,
+        rating: "like",
+        total: scanned.total,
+        cursor: cursor,
+        checked: rows.length,
+        missingCount: missing.length,
+        unknownCount: unknown,
+        hasMore: next !== null,
+        nextCursor: next,
+        likes: missing,
+      };
+    });
+  });
+}
+
 function hasWaveformTool(args) {
   return toolSong(args).then(function (song) {
     return resolveSubject("track", song.title, song.artist, true).then(function (subject) {
@@ -2525,12 +2667,14 @@ function setTicks(on) {
 // Your likes: the app's likes, sent to Community
 // ---------------------------------------------------------------------------
 //
-// One direction only (owner decision): a like, dislike or un-like made in the
-// app (api.library.onLikeChanged) becomes a like or un-like here, from the
-// moment the switch is on — nothing already liked is sent. Community has no
-// dislike, so disliking something you had liked takes the Community like
-// away. A like on something nothing was shared about creates its subject on
-// the server (PUT /v1/likes). Tags aren't Community subjects.
+// One direction only (owner decision): a like, dislike or un-rate made in the
+// app (api.library.onLikeChanged) becomes the same rating here, from the
+// moment the switch is on — nothing already rated is sent. Like, dislike and
+// no rating mirror the app's three states: PUT /v1/likes with rating "like" /
+// "dislike", DELETE for no rating (a dislike is the member's own on
+// Community — never counted or shown to others). A rating on something
+// nothing was shared about creates its subject on the server. Tags aren't
+// Community subjects.
 
 var LIKE_KINDS = { track: true, album: true, artist: true };
 
@@ -2538,35 +2682,66 @@ function canSyncLikes() {
   return !!(api.library && typeof api.library.onLikeChanged === "function");
 }
 
-// What a change becomes on Community: "PUT" (a like), "DELETE" (a like that
-// was undone, or turned into a dislike), or null (nothing to send — a dislike
-// of something never liked, a tag, a repeat).
-function likeMethod(change) {
+function ratingOf(v) {
+  return v === 1 ? 1 : v === -1 ? -1 : 0;
+}
+
+// What a change becomes on Community: { method: "PUT", rating } for a like or
+// a dislike, { method: "DELETE" } for no rating, or null (nothing to send — a
+// tag, an album without its artist, a repeat).
+function likeRequest(change) {
   if (!change || !LIKE_KINDS[change.kind] || !change.name) return null;
   if (change.kind === "album" && !change.artistName) return null;
-  if (change.liked === 1 && change.previous !== 1) return "PUT";
-  if (change.liked !== 1 && change.previous === 1) return "DELETE";
-  return null;
+  var now = ratingOf(change.liked);
+  if (now === ratingOf(change.previous)) return null;
+  if (now === 1) return { method: "PUT", rating: "like" };
+  if (now === -1) return { method: "PUT", rating: "dislike" };
+  return { method: "DELETE" };
 }
 
 // Likes go out one at a time, in the order they were made, so a quick like
 // then un-like can't land the other way round.
 var likeChain = Promise.resolve();
 
+// A server from before dislikes ignores `rating` and stores every PUT as a
+// like — a dislike would land as a public like. It is recognised by its reply
+// (no `rating` field): the like it just made is taken back at once, and until
+// the plugin restarts a dislike is sent the old way, as an un-like.
+var dislikesUnsupported = false;
+
+function sendRating(method, body) {
+  var dislike = body.rating === "dislike";
+  if (dislike && dislikesUnsupported) {
+    var plain = Object.assign({}, body);
+    delete plain.rating;
+    return request("DELETE", "/v1/likes", plain, true);
+  }
+  return request(method, "/v1/likes", body, true).then(function (reply) {
+    if (!dislike || (reply && typeof reply === "object" && "rating" in reply)) return reply;
+    dislikesUnsupported = true;
+    api.log("warn", "Viboplr Community doesn't take dislikes yet; it stored one as a like, which is being taken back. Dislikes are sent as un-likes until Viboplr restarts.");
+    var undo = Object.assign({}, body);
+    delete undo.rating;
+    return request("DELETE", "/v1/likes", undo, true);
+  });
+}
+
 function onLikeChanged(change) {
   if (!state || !state.syncLikes || !state.token) return;
-  var method = likeMethod(change);
-  if (!method) return;
+  var send = likeRequest(change);
+  if (!send) return;
+  var method = send.method;
   var body = { kind: change.kind, name: change.name, artistName: change.artistName || null };
   if (change.kind === "track") {
     body.albumName = change.albumTitle || null;
     body.albumArtistName = change.albumArtistName || null;
   }
+  if (send.rating) body.rating = send.rating;
   var entity = { kind: change.kind, name: change.name, artistName: change.artistName || null, albumTitle: change.albumTitle || null };
   likeChain = likeChain
     .then(function () {
       if (!api || !state.syncLikes || !state.token) return;
-      return request(method, "/v1/likes", body, true).then(function () {
+      return sendRating(method, body).then(function () {
         forgetSubject(entity.kind, entity.name, entity.artistName);
         // A Community tab showing it would show the old count until its TTL.
         if (state.tabs[tabKey(entity)]) return refreshTab(entity, true);
@@ -2808,7 +2983,7 @@ function likeSyncNodes() {
     type: "settings-row",
     label: "Send my likes to Community",
     description:
-      "From now on, a song, album or artist you like in Viboplr is liked on Viboplr Community too, and un-liking or disliking it takes that like away. Likes there are public. Likes you already have aren't sent.",
+      "From now on, a song, album or artist you like or dislike in Viboplr is rated the same on Viboplr Community, and No rating clears it there. Likes there are public; dislikes are yours alone, never shown to anyone else. Ratings you already have aren't sent.",
     control: { type: "toggle", label: "", action: "toggle-sync-likes", checked: state.syncLikes && !!state.token, disabled: !state.token },
   };
   var nodes = [row];
@@ -3733,6 +3908,7 @@ function activate(pluginApi) {
     api.assistant.onTool("publish_cue_sheet", publishCueSheetTool);
     api.assistant.onTool("get_formats", getFormatsTool);
     api.assistant.onTool("has_waveform", hasWaveformTool);
+    api.assistant.onTool("my_likes", myLikesTool);
   }
   api.contextMenu.onAction("publish-lyrics", function (target) {
     if (!target || !target.title) return;

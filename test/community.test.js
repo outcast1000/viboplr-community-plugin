@@ -36,6 +36,9 @@ const COMMENT = { id: 11, subjectId: 7, body: "that bridge", atSecs: 161, create
 const playsServer = { status: 200 };
 // Synced lyrics shared for Jóga; a test sets `items` (and puts it back).
 const lyricsServer = { items: null };
+// Whether PUT /v1/likes knows `rating`; a test turns it off to play a server
+// from before dislikes (and puts it back).
+const likesServer = { ratings: true };
 
 // A community with Jóga (a cue sheet, a comment) and Björk (songs with something shared).
 function route(log = []) {
@@ -59,7 +62,12 @@ function route(log = []) {
       const n = JSON.parse(init.body).plays.length;
       return { body: { accepted: n, skipped: 0 } };
     }
-    if (p === "/v1/likes") return { body: { subject: { id: 7, kind: "track", url: "u" }, likes: 4, liked: init.method === "PUT" } };
+    if (p === "/v1/likes") {
+      const body = { subject: { id: 7, kind: "track", url: "u" }, likes: 4, liked: init.method === "PUT" };
+      if (!likesServer.ratings) return { body };
+      const rating = init.method === "PUT" ? JSON.parse(init.body).rating || "like" : null;
+      return { body: { ...body, liked: rating === "like", rating } };
+    }
     if (p === "/v1/comments/11/like") return { body: { likes: init.method === "PUT" ? 3 : 2, liked: init.method === "PUT" } };
     if (p === "/v1/subjects/2/comments") return { body: { comments: [], hasMore: false } };
     if (p === "/v1/subjects/2/children") return { body: { tracks: [JOGA], albums: [] } };
@@ -210,7 +218,7 @@ test("rows show the picture Community matched, and only one Community serves", a
   assert.equal(plugin._subjectRow({ ...JOGA, art: { small: "https://evil.example/x.jpg" } }).imageUrl, undefined);
 });
 
-test("likes made in the app reach Community by default, as likes and un-likes, until switched off", async () => {
+test("likes made in the app reach Community by default, as likes, dislikes and no rating, until switched off", async () => {
   const { host, log } = await setup({ session: SIGNED_IN });
   const sent = () => log.filter(([, p]) => p === "/v1/likes").map(([m]) => m);
   const like = (over) => host.likeChanged({ kind: "track", name: "Jóga", artistName: "Björk", albumTitle: "Homogenic", albumArtistName: "Björk", liked: 1, previous: 0, ...over });
@@ -232,15 +240,39 @@ test("likes made in the app reach Community by default, as likes and un-likes, u
   assert.equal(host.storage.get("syncLikes"), true);
 
   await like();
-  await like({ liked: 0, previous: 1 }); // un-like
-  await like({ liked: -1, previous: 1 }); // liked → disliked: the like goes
-  await like({ liked: -1, previous: 0 }); // a dislike of something never liked: nothing to say
+  await like({ liked: 0, previous: 1 }); // un-like: no rating
+  await like({ liked: -1, previous: 1 }); // liked → disliked: the dislike replaces it
+  await like({ liked: -1, previous: 0 }); // a dislike of something never liked
+  await like({ liked: 0, previous: -1 }); // the dislike cleared
+  await like({ liked: -1, previous: -1 }); // a repeat: nothing to say
   await like({ kind: "tag", name: "jazz", artistName: null, albumTitle: null, albumArtistName: null }); // not a subject
   await like({ kind: "album", name: "Post", artistName: null }); // an album without its artist can't be keyed
   await flush(10);
-  assert.deepEqual(sent(), ["PUT", "DELETE", "DELETE"]);
+  assert.deepEqual(sent(), ["PUT", "DELETE", "PUT", "PUT", "DELETE"]);
+  const bodies = host.requests.filter((r) => r.url.endsWith("/v1/likes")).map((r) => JSON.parse(r.init.body).rating ?? null);
+  assert.deepEqual(bodies, ["like", null, "dislike", "dislike", null]);
   const body = JSON.parse(host.requests.find((r) => r.url.endsWith("/v1/likes")).init.body);
-  assert.deepEqual(body, { kind: "track", name: "Jóga", artistName: "Björk", albumName: "Homogenic", albumArtistName: "Björk" });
+  assert.deepEqual(body, { kind: "track", name: "Jóga", artistName: "Björk", albumName: "Homogenic", albumArtistName: "Björk", rating: "like" });
+});
+
+test("a server from before dislikes: the like it stored for a dislike is taken back, and dislikes go as un-likes after", async () => {
+  likesServer.ratings = false;
+  try {
+    const { host, log } = await setup({ session: SIGNED_IN });
+    const sent = () => log.filter(([, p]) => p === "/v1/likes").map(([m]) => m);
+    const rate = (over) => host.likeChanged({ kind: "track", name: "Jóga", artistName: "Björk", albumTitle: null, albumArtistName: null, ...over });
+    await rate({ liked: 1, previous: 0 }); // a like: the old server takes it as one
+    await rate({ liked: -1, previous: 1 }); // a dislike: stored as a like, so undone at once
+    await rate({ liked: 0, previous: -1 });
+    await rate({ liked: -1, previous: 0 }); // known now: sent as an un-like, never a PUT
+    await flush(10);
+    assert.deepEqual(sent(), ["PUT", "PUT", "DELETE", "DELETE", "DELETE"]);
+    const bodies = host.requests.filter((r) => r.url.endsWith("/v1/likes")).map((r) => JSON.parse(r.init.body).rating ?? null);
+    assert.deepEqual(bodies, ["like", "dislike", null, null, null]);
+    assert.ok(host.logs.some((l) => /doesn't take dislikes yet/.test(JSON.stringify(l))));
+  } finally {
+    likesServer.ratings = true;
+  }
 });
 
 const PLAYED = { key: "q:1", title: "Jóga", artist_name: "Björk", album_title: "Homogenic", album_artist_name: "Björk" };
